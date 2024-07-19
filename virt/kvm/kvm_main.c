@@ -4978,7 +4978,7 @@ int __weak kvm_arch_vcpu_ioctl_translate2(struct kvm_vcpu *vcpu,
 static int kvm_vcpu_ioctl_translate2(struct kvm_vcpu *vcpu,
 				     struct kvm_translation2 *tr)
 {
-	/* Don't allow FORCE_SET_ACCESSED and SET_BITS without SET_ACCESSED */
+	/* FORCE_SET_ACCESSED and SET_DIRTY both require SET_ACCESSED */
 	if (!(tr->flags & KVM_TRANSLATE_FLAGS_SET_ACCESSED) &&
 	    (tr->flags & KVM_TRANSLATE_FLAGS_FORCE_SET_ACCESSED ||
 	     tr->flags & KVM_TRANSLATE_FLAGS_SET_DIRTY))
@@ -4990,6 +4990,10 @@ static int kvm_vcpu_ioctl_translate2(struct kvm_vcpu *vcpu,
 
 	if (tr->flags & ~KVM_TRANSLATE_FLAGS_ALL ||
 	    tr->access & ~KVM_TRANSLATE_ACCESS_ALL)
+		return -EINVAL;
+
+	if (memchr_inv(tr->padding, 0, sizeof(tr->padding)) ||
+	    memchr_inv(tr->padding2, 0, sizeof(tr->padding2)))
 		return -EINVAL;
 
 	return kvm_arch_vcpu_ioctl_translate2(vcpu, tr);

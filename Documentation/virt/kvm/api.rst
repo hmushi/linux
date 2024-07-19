@@ -6688,20 +6688,21 @@ the reason for the failure.
 
       /* out */
       __u64 physical_address;
-      __u8  valid;
   #define KVM_TRANSLATE_FAULT_NOT_PRESENT	1
   #define KVM_TRANSLATE_FAULT_PRIVILEGE_VIOLATION	2
   #define KVM_TRANSLATE_FAULT_RESERVED_BITS	3
   #define KVM_TRANSLATE_FAULT_INVALID_GVA	4
   #define KVM_TRANSLATE_FAULT_INVALID_GPA	5
       __u16 error_code;
+      __u8  valid;
       __u8  set_bits_succeeded;
       __u8  padding2[4];
   };
 
+Both padding fields must be zero; the ioctl fails with -EINVAL otherwise.
+
 If the page walk succeeds, `physical_address` will contain the result of the
-page walk, `valid` will be set to 1 and `error_code` will not contain any
-meaningful value.
+page walk, `valid` will be set to 1 and `error_code` will be 0.
 
 If the page walk fails, `valid` will be set to 0 and `error_code` will contain
 the reason of the walk failure. `physical_address` may contain the physical

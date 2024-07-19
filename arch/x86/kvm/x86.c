@@ -4995,6 +4995,7 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_MEMORY_FAULT_INFO:
 	case KVM_CAP_X86_GUEST_MODE:
 	case KVM_CAP_ONE_REG:
+	case KVM_CAP_TRANSLATE2:
 		r = 1;
 		break;
 	case KVM_CAP_PRE_FAULT_MEMORY:
@@ -13485,6 +13486,101 @@ int kvm_arch_vcpu_ioctl_translate(struct kvm_vcpu *vcpu,
 	tr->physical_address = gpa;
 	tr->valid = gpa != INVALID_GPA;
 	tr->usermode = 0;
+
+	vcpu_put(vcpu);
+	return 0;
+}
+
+/*
+ * Translate a guest virtual address to a guest physical address.
+ */
+int kvm_arch_vcpu_ioctl_translate2(struct kvm_vcpu *vcpu,
+				    struct kvm_translation2 *tr)
+{
+	int idx, set_bit_mode = 0, access = 0;
+	struct x86_exception exception = { };
+	gva_t vaddr = tr->linear_address;
+	u16 status = 0;
+	gpa_t gpa;
+
+	if (vcpu->kvm->arch.has_protected_state &&
+	    vcpu->arch.guest_state_protected)
+		return -EINVAL;
+
+	if (tr->flags & KVM_TRANSLATE_FLAGS_SET_ACCESSED)
+		set_bit_mode |= PWALK_SET_ACCESSED;
+	if (tr->flags & KVM_TRANSLATE_FLAGS_SET_DIRTY)
+		set_bit_mode |= PWALK_SET_DIRTY;
+	if (tr->flags & KVM_TRANSLATE_FLAGS_FORCE_SET_ACCESSED)
+		set_bit_mode |= PWALK_FORCE_SET_ACCESSED;
+
+	if (tr->access & KVM_TRANSLATE_ACCESS_WRITE)
+		access |= PFERR_WRITE_MASK;
+	if (tr->access & KVM_TRANSLATE_ACCESS_USER)
+		access |= PFERR_USER_MASK;
+	if (tr->access & KVM_TRANSLATE_ACCESS_EXEC)
+		access |= PFERR_FETCH_MASK;
+
+	vcpu_load(vcpu);
+
+	idx = srcu_read_lock(&vcpu->kvm->srcu);
+
+	/* Even with PAE virtual addresses are still 32-bit */
+	if (is_64_bit_mode(vcpu) ? is_noncanonical_address(vaddr, vcpu, 0) :
+				   tr->linear_address >> 32) {
+		tr->valid = false;
+		tr->error_code = KVM_TRANSLATE_FAULT_INVALID_GVA;
+		tr->physical_address = 0;
+		tr->set_bits_succeeded = 0;
+		goto exit;
+	}
+
+	gpa = kvm_mmu_gva_to_gpa(vcpu, vaddr, access, set_bit_mode, &exception,
+				 &status);
+
+	tr->physical_address = exception.error_code_valid ? exception.gpa_page_fault : gpa;
+	tr->valid = !exception.error_code_valid;
+
+	if (!exception.error_code_valid) {
+		tr->error_code = 0;
+	} else if (exception.flags & KVM_X86_UNMAPPED_PTE_GPA) {
+		/*
+		 * Order is important here:
+		 * - If there are access restrictions those will always be
+		 *   set in the error_code
+		 * - If a PTE GPA is unmapped, the present bit in error_code
+		 *   may not have been set already
+		 */
+		tr->error_code = KVM_TRANSLATE_FAULT_INVALID_GPA;
+	} else if (!(exception.error_code & PFERR_PRESENT_MASK)) {
+		tr->error_code = KVM_TRANSLATE_FAULT_NOT_PRESENT;
+	} else if (exception.error_code & PFERR_RSVD_MASK) {
+		tr->error_code = KVM_TRANSLATE_FAULT_RESERVED_BITS;
+	} else {
+		/*
+		 * Everything else is an access-rights denial, including a
+		 * present fault with none of USER/WRITE/FETCH set: SMAP or
+		 * protection keys refusing a supervisor read (access == 0)
+		 * produce a bare PFERR_PRESENT_MASK error code.
+		 */
+		tr->error_code = KVM_TRANSLATE_FAULT_PRIVILEGE_VIOLATION;
+	}
+
+	/*
+	 * A/D updates were attempted if the walk succeeded, or on the
+	 * successfully-visited levels of a failed walk under
+	 * FORCE_SET_ACCESSED, and only ever on a paging MMU.  They
+	 * succeeded if no update was lost to a read-only PTE page or a
+	 * write failure.
+	 */
+	tr->set_bits_succeeded = tr->flags && is_paging(vcpu) &&
+				 (tr->valid ||
+				  (tr->flags & KVM_TRANSLATE_FLAGS_FORCE_SET_ACCESSED)) &&
+				 !(status & (PWALK_STATUS_READ_ONLY_PTE_GPA |
+					     PWALK_STATUS_SET_BITS_FAILED));
+
+exit:
+	srcu_read_unlock(&vcpu->kvm->srcu, idx);
 
 	vcpu_put(vcpu);
 	return 0;
