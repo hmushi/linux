@@ -297,6 +297,41 @@ static inline bool FNAME(is_last_gpte)(struct kvm_mmu *mmu,
 
 	return gpte & PT_PAGE_SIZE_MASK;
 }
+
+/*
+ * Early-abort permission check for intermediate page-table levels.
+ *
+ * The W/U/X rights accumulate as an AND down the walk, so a right which
+ * is already missing from the partial accumulation stays missing in the
+ * final access rights, and faulting on it early matches hardware's
+ * verdict on the completed walk.  The presence-triggered checks must
+ * wait for the leaf: SMEP and SMAP fault on U=1 in the *final*
+ * accumulated rights (U=1 at an intermediate level over a U=0 leaf is a
+ * legal supervisor mapping), and the protection key is taken from the
+ * leaf PTE only (hardware ignores bits 62:59 of non-leaf entries).
+ * Those run in the full permission_fault() check on the accumulated
+ * access after the walk loop.
+ */
+static bool FNAME(walk_abort_fault)(struct kvm_vcpu *vcpu,
+				    struct kvm_mmu *mmu,
+				    unsigned int pte_access, u64 access)
+{
+	kvm_mmu_refresh_passthrough_bits(vcpu, mmu);
+
+	if ((access & PFERR_USER_MASK) && !(pte_access & ACC_USER_MASK))
+		return true;
+
+	if ((access & PFERR_WRITE_MASK) && !(pte_access & ACC_WRITE_MASK) &&
+	    ((access & PFERR_USER_MASK) || is_cr0_wp(mmu)))
+		return true;
+
+	if ((access & PFERR_FETCH_MASK) && !(pte_access & ACC_EXEC_MASK) &&
+	    is_efer_nx(mmu))
+		return true;
+
+	return false;
+}
+
 /*
  * Fetch a guest pte for a guest virtual address, or for an L2's GPA.
  */
@@ -433,6 +468,21 @@ retry_walk:
 			goto error;
 		}
 
+		walker->pte_access = FNAME(gpte_access)(pte_access ^ walk_nx_mask);
+
+		/*
+		 * Abort the walk early only for rights which are already
+		 * missing from the partial accumulation; the leaf gets the
+		 * full architectural check after the loop.
+		 */
+		if (!FNAME(is_last_gpte)(mmu, walker->level, pte) &&
+		    unlikely(FNAME(walk_abort_fault)(vcpu, mmu,
+						     walker->pte_access,
+						     access))) {
+			errcode = PFERR_PRESENT_MASK;
+			goto error;
+		}
+
 		walker->ptes[walker->level - 1] = pte;
 
 		/* Convert to ACC_*_MASK flags for struct guest_walker.  */
@@ -440,13 +490,11 @@ retry_walk:
 	} while (!FNAME(is_last_gpte)(mmu, walker->level, pte));
 
 	pte_pkey = FNAME(gpte_pkeys)(vcpu, pte);
-	accessed_dirty = have_ad ? pte_access & PT_GUEST_ACCESSED_MASK : 0;
-
-	/* Convert to ACC_*_MASK flags for struct guest_walker.  */
-	walker->pte_access = FNAME(gpte_access)(pte_access ^ walk_nx_mask);
 	errcode = permission_fault(vcpu, mmu, walker->pte_access, pte_pkey, access);
 	if (unlikely(errcode))
 		goto error;
+
+	accessed_dirty = have_ad ? pte_access & PT_GUEST_ACCESSED_MASK : 0;
 
 	gfn = gpte_to_gfn_lvl(pte, walker->level);
 	gfn += (addr & PT_LVL_OFFSET_MASK(walker->level)) >> PAGE_SHIFT;
