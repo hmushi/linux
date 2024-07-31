@@ -4969,6 +4969,32 @@ static int kvm_vcpu_pre_fault_memory(struct kvm_vcpu *vcpu,
 }
 #endif
 
+int __weak kvm_arch_vcpu_ioctl_translate2(struct kvm_vcpu *vcpu,
+					  struct kvm_translation2 *tr)
+{
+	return -EINVAL;
+}
+
+static int kvm_vcpu_ioctl_translate2(struct kvm_vcpu *vcpu,
+				     struct kvm_translation2 *tr)
+{
+	/* Don't allow FORCE_SET_ACCESSED and SET_BITS without SET_ACCESSED */
+	if (!(tr->flags & KVM_TRANSLATE_FLAGS_SET_ACCESSED) &&
+	    (tr->flags & KVM_TRANSLATE_FLAGS_FORCE_SET_ACCESSED ||
+	     tr->flags & KVM_TRANSLATE_FLAGS_SET_DIRTY))
+		return -EINVAL;
+
+	if (tr->flags & KVM_TRANSLATE_FLAGS_SET_DIRTY &&
+	    !(tr->access & KVM_TRANSLATE_ACCESS_WRITE))
+		return -EINVAL;
+
+	if (tr->flags & ~KVM_TRANSLATE_FLAGS_ALL ||
+	    tr->access & ~KVM_TRANSLATE_ACCESS_ALL)
+		return -EINVAL;
+
+	return kvm_arch_vcpu_ioctl_translate2(vcpu, tr);
+}
+
 static int kvm_wait_for_vcpu_online(struct kvm_vcpu *vcpu)
 {
 	struct kvm *kvm = vcpu->kvm;
@@ -5006,6 +5032,7 @@ static inline bool kvm_is_vcpu_plane_ioctl(unsigned ioctl)
 	case KVM_GET_SREGS:
 	case KVM_SET_SREGS:
 	case KVM_TRANSLATE:
+	case KVM_TRANSLATE2:
 	case KVM_GET_PLANE_RUN_STATE:
 	case KVM_SET_PLANE_RUN_STATE:
 		return true;
@@ -5222,6 +5249,21 @@ out_free1:
 		if (copy_from_user(&tr, argp, sizeof(tr)))
 			goto out;
 		r = kvm_arch_vcpu_ioctl_translate(vcpu, &tr);
+		if (r)
+			goto out;
+		r = -EFAULT;
+		if (copy_to_user(argp, &tr, sizeof(tr)))
+			goto out;
+		r = 0;
+		break;
+	}
+	case KVM_TRANSLATE2: {
+		struct kvm_translation2 tr;
+
+		r = -EFAULT;
+		if (copy_from_user(&tr, argp, sizeof(tr)))
+			goto out;
+		r = kvm_vcpu_ioctl_translate2(vcpu, &tr);
 		if (r)
 			goto out;
 		r = -EFAULT;
