@@ -244,6 +244,10 @@ enum x86_intercept_stage;
 #define PFERR_PRIVATE_ACCESS   BIT_ULL(49)
 #define PFERR_SYNTHETIC_MASK   (PFERR_IMPLICIT_ACCESS | PFERR_PRIVATE_ACCESS)
 
+#define PWALK_SET_ACCESSED	BIT(0)
+#define PWALK_SET_DIRTY	BIT(1)
+#define PWALK_SET_ALL	(PWALK_SET_ACCESSED | PWALK_SET_DIRTY)
+
 struct kvm_kernel_irqfd;
 struct kvm_kernel_irq_routing_entry;
 
@@ -494,7 +498,7 @@ struct kvm_pagewalk {
 				  struct x86_exception *fault,
 				  bool from_hardware);
 	gpa_t (*gva_to_gpa)(struct kvm_vcpu *vcpu, struct kvm_pagewalk *w,
-			    gpa_t gva_or_gpa, u64 access,
+			    gpa_t gva_or_gpa, u64 access, u64 flags,
 			    struct x86_exception *exception);
 
 	union kvm_cpu_role cpu_role;
@@ -1792,7 +1796,7 @@ struct kvm_x86_nested_ops {
 	bool (*get_nested_state_pages)(struct kvm_vcpu *vcpu);
 	int (*write_log_dirty)(struct kvm_vcpu *vcpu, gpa_t l2_gpa);
 	gpa_t (*translate_nested_gpa)(struct kvm_vcpu *vcpu, gpa_t gpa,
-				      u64 access,
+				      u64 access, u64 flags,
 				      struct x86_exception *exception,
 				      u64 pte_access);
 

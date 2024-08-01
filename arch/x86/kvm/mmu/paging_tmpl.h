@@ -315,7 +315,7 @@ static inline bool FNAME(is_last_gpte)(struct kvm_pagewalk *w,
  */
 static int FNAME(walk_addr_generic)(struct guest_walker *walker,
 				    struct kvm_vcpu *vcpu, struct kvm_pagewalk *w,
-				    gpa_t addr, u64 access)
+				    gpa_t addr, u64 access, u64 flags)
 {
 	int ret;
 	pt_element_t pte;
@@ -402,7 +402,7 @@ retry_walk:
 
 		real_gpa = kvm_translate_gpa(vcpu, w, gfn_to_gpa(table_gfn),
 					     nested_access | PFERR_GUEST_PAGE_MASK,
-					     &walker->fault, 0);
+					     flags, &walker->fault, 0);
 
 		if (unlikely(real_gpa == INVALID_GPA))
 			return 0;
@@ -476,7 +476,7 @@ retry_walk:
 
 	real_gpa = kvm_translate_gpa(vcpu, w, gfn_to_gpa(gfn),
 				     access | PFERR_GUEST_FINAL_MASK,
-				     &walker->fault, walker->pte_access);
+				     flags, &walker->fault, walker->pte_access);
 	if (real_gpa == INVALID_GPA)
 		return 0;
 
@@ -581,10 +581,11 @@ error:
 }
 
 static int FNAME(walk_addr)(struct guest_walker *walker,
-			    struct kvm_vcpu *vcpu, gpa_t addr, u64 access)
+			    struct kvm_vcpu *vcpu, gpa_t addr, u64 access,
+			    u64 flags)
 {
 	return FNAME(walk_addr_generic)(walker, vcpu, vcpu->arch.mmu->w, addr,
-					access);
+					access, flags);
 }
 
 static bool
@@ -834,7 +835,8 @@ static int FNAME(page_fault)(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault
 	 * The bit needs to be cleared before walking guest page tables.
 	 */
 	r = FNAME(walk_addr)(&walker, vcpu, fault->addr,
-			     fault->error_code & ~PFERR_RSVD_MASK);
+			     fault->error_code & ~PFERR_RSVD_MASK,
+			     PWALK_SET_ALL);
 
 	/*
 	 * The page is not mapped by the guest.  Let the guest handle it.
@@ -925,7 +927,7 @@ static gpa_t FNAME(get_level1_sp_gpa)(struct kvm_mmu_page *sp)
 
 /* Note, @addr is a GPA when gva_to_gpa() translates an L2 GPA to an L1 GPA. */
 static gpa_t FNAME(gva_to_gpa)(struct kvm_vcpu *vcpu, struct kvm_pagewalk *w,
-			       gpa_t addr, u64 access,
+			       gpa_t addr, u64 access, u64 flags,
 			       struct x86_exception *exception)
 {
 	struct guest_walker walker;
@@ -937,7 +939,7 @@ static gpa_t FNAME(gva_to_gpa)(struct kvm_vcpu *vcpu, struct kvm_pagewalk *w,
 	WARN_ON_ONCE((addr >> 32) && w == &vcpu->arch.gva_walk);
 #endif
 
-	r = FNAME(walk_addr_generic)(&walker, vcpu, w, addr, access);
+	r = FNAME(walk_addr_generic)(&walker, vcpu, w, addr, access, flags);
 
 	if (r) {
 		gpa = gfn_to_gpa(walker.gfn);

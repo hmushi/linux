@@ -4407,7 +4407,7 @@ void kvm_mmu_sync_prev_roots(struct kvm_vcpu *vcpu)
 }
 
 static gpa_t nonpaging_gva_to_gpa(struct kvm_vcpu *vcpu, struct kvm_pagewalk *w,
-				  gpa_t vaddr, u64 access,
+				  gpa_t vaddr, u64 access, u64 flags,
 				  struct x86_exception *exception)
 {
 	if (exception)
@@ -4419,7 +4419,7 @@ static gpa_t nonpaging_gva_to_gpa(struct kvm_vcpu *vcpu, struct kvm_pagewalk *w,
 	 * the last argument to kvm_translate_gpa (which NPT does not use).
 	 */
 	return kvm_translate_gpa(vcpu, w, vaddr, access | PFERR_GUEST_FINAL_MASK,
-				 exception, ACC_ALL);
+				 flags, exception, ACC_ALL);
 }
 
 static bool mmio_info_in_cache(struct kvm_vcpu *vcpu, u64 addr, bool direct)

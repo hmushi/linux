@@ -2140,7 +2140,7 @@ static bool svm_get_nested_state_pages(struct kvm_vcpu *vcpu)
 }
 
 static gpa_t svm_translate_nested_gpa(struct kvm_vcpu *vcpu, gpa_t gpa,
-				      u64 access,
+				      u64 access, u64 flags,
 				      struct x86_exception *exception,
 				      u64 pte_access)
 {
@@ -2154,7 +2154,7 @@ static gpa_t svm_translate_nested_gpa(struct kvm_vcpu *vcpu, gpa_t gpa,
 	if (!(svm->nested.ctl.misc_ctl & SVM_MISC_ENABLE_GMET))
 		access |= PFERR_USER_MASK;
 
-	return w->gva_to_gpa(vcpu, w, gpa, access, exception);
+	return w->gva_to_gpa(vcpu, w, gpa, access, flags, exception);
 }
 
 struct kvm_x86_nested_ops svm_nested_ops __initdata = {

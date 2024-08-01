@@ -2070,7 +2070,8 @@ static u64 kvm_hv_flush_tlb(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
 	 */
 	if (!hc->fast) {
 		hc->ingpa = kvm_translate_gpa(vcpu, &vcpu->arch.gva_walk, hc->ingpa,
-					      PFERR_GUEST_FINAL_MASK, NULL, 0);
+					      PFERR_GUEST_FINAL_MASK, PWALK_SET_ALL,
+					      NULL, 0);
 		if (unlikely(hc->ingpa == INVALID_GPA))
 			return HV_STATUS_INVALID_HYPERCALL_INPUT;
 	}
