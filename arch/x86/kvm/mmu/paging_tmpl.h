@@ -337,7 +337,7 @@ static bool FNAME(walk_abort_fault)(struct kvm_vcpu *vcpu,
  */
 static int FNAME(walk_addr_generic)(struct guest_walker *walker,
 				    struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
-				    gpa_t addr, u64 access)
+				    gpa_t addr, u64 access, u64 flags)
 {
 	int ret;
 	pt_element_t pte;
@@ -423,7 +423,7 @@ retry_walk:
 		walker->pte_gpa[walker->level - 1] = pte_gpa;
 
 		real_gpa = kvm_translate_gpa(vcpu, mmu, gfn_to_gpa(table_gfn),
-					     nested_access, &walker->fault);
+					     nested_access, flags, &walker->fault);
 
 		/*
 		 * FIXME: This can happen if emulation (for of an INS/OUTS
@@ -522,7 +522,8 @@ retry_walk:
 		gfn += pse36_gfn_delta(pte);
 #endif
 
-	real_gpa = kvm_translate_gpa(vcpu, mmu, gfn_to_gpa(gfn), access, &walker->fault);
+	real_gpa = kvm_translate_gpa(vcpu, mmu, gfn_to_gpa(gfn), access, flags,
+				     &walker->fault);
 	if (real_gpa == INVALID_GPA)
 		return 0;
 
@@ -600,10 +601,11 @@ error:
 }
 
 static int FNAME(walk_addr)(struct guest_walker *walker,
-			    struct kvm_vcpu *vcpu, gpa_t addr, u64 access)
+			    struct kvm_vcpu *vcpu, gpa_t addr, u64 access,
+			    u64 flags)
 {
 	return FNAME(walk_addr_generic)(walker, vcpu, vcpu->arch.mmu, addr,
-					access);
+					access, flags);
 }
 
 static bool
@@ -853,7 +855,8 @@ static int FNAME(page_fault)(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault
 	 * The bit needs to be cleared before walking guest page tables.
 	 */
 	r = FNAME(walk_addr)(&walker, vcpu, fault->addr,
-			     fault->error_code & ~PFERR_RSVD_MASK);
+			     fault->error_code & ~PFERR_RSVD_MASK,
+			     PWALK_SET_ALL);
 
 	/*
 	 * The page is not mapped by the guest.  Let the guest handle it.
@@ -942,7 +945,7 @@ static gpa_t FNAME(get_level1_sp_gpa)(struct kvm_mmu_page *sp)
 
 /* Note, @addr is a GPA when gva_to_gpa() translates an L2 GPA to an L1 GPA. */
 static gpa_t FNAME(gva_to_gpa)(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
-			       gpa_t addr, u64 access,
+			       gpa_t addr, u64 access, u64 flags,
 			       struct x86_exception *exception)
 {
 	struct guest_walker walker;
@@ -954,7 +957,7 @@ static gpa_t FNAME(gva_to_gpa)(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
 	WARN_ON_ONCE((addr >> 32) && mmu == vcpu->arch.walk_mmu);
 #endif
 
-	r = FNAME(walk_addr_generic)(&walker, vcpu, mmu, addr, access);
+	r = FNAME(walk_addr_generic)(&walker, vcpu, mmu, addr, access, flags);
 
 	if (r) {
 		gpa = gfn_to_gpa(walker.gfn);
