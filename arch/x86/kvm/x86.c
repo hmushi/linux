@@ -4856,6 +4856,17 @@ static int vcpu_mmio_read(struct kvm_vcpu *vcpu, gpa_t addr, int len, void *v)
 	return handled;
 }
 
+gpa_t kvm_mmu_gva_to_gpa(struct kvm_vcpu *vcpu, gva_t gva, u64 access,
+			 u64 flags, struct x86_exception *exception,
+			 u16 *status)
+{
+	struct kvm_pagewalk *gva_walk = &vcpu->arch.gva_walk;
+
+	return gva_walk->gva_to_gpa(vcpu, gva_walk, gva, access, flags,
+				    exception, status);
+}
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_mmu_gva_to_gpa);
+
 gpa_t kvm_mmu_gva_to_gpa_read(struct kvm_vcpu *vcpu, gva_t gva,
 			      struct x86_exception *exception)
 {
