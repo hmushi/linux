@@ -31,6 +31,8 @@ struct x86_exception {
 	};
 	u8 async_page_fault;
 	unsigned long exit_qualification;
+#define KVM_X86_UNMAPPED_PTE_GPA	BIT(0)
+	u16 flags;
 };
 
 /*
