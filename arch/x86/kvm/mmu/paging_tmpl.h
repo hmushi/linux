@@ -364,6 +364,13 @@ retry_walk:
 	pte           = kvm_mmu_get_guest_pgd(vcpu, mmu);
 	have_ad       = PT_HAVE_ACCESSED_DIRTY(mmu);
 
+	/*
+	 * The PDPTE check below can fail the walk before fault.flags has
+	 * been written: the error label does not set it, and the fault
+	 * is copied wholesale into the caller's exception.
+	 */
+	walker->fault.flags = 0;
+
 #if PTTYPE == 64
 	walk_nx_mask = 1ULL << PT64_NX_SHIFT;
 	if (walker->level == PT32E_ROOT_LEVEL) {
@@ -430,8 +437,10 @@ retry_walk:
 			return 0;
 
 		slot = kvm_vcpu_gfn_to_memslot(vcpu, gpa_to_gfn(real_gpa));
-		if (!kvm_is_visible_memslot(slot))
+		if (!kvm_is_visible_memslot(slot)) {
+			walker->fault.flags = KVM_X86_UNMAPPED_PTE_GPA;
 			goto error;
+		}
 
 		host_addr = gfn_to_hva_memslot_prot(slot, gpa_to_gfn(real_gpa),
 					    &walker->pte_writable[walker->level - 1]);
