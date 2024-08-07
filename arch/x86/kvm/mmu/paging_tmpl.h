@@ -355,6 +355,7 @@ static int FNAME(walk_addr_generic)(struct guest_walker *walker,
 	const int fetch_fault = access & PFERR_FETCH_MASK;
 	u16 errcode = 0;
 	gpa_t real_gpa;
+	gpa_t pte_fault_gpa = INVALID_GPA;
 	gfn_t gfn;
 
 	trace_kvm_mmu_pagetable_walk(addr, access);
@@ -370,6 +371,7 @@ retry_walk:
 	 * is copied wholesale into the caller's exception.
 	 */
 	walker->fault.flags = 0;
+	pte_fault_gpa = INVALID_GPA;
 
 #if PTTYPE == 64
 	walk_nx_mask = 1ULL << PT64_NX_SHIFT;
@@ -435,6 +437,13 @@ retry_walk:
 		 */
 		if (unlikely(real_gpa == INVALID_GPA))
 			return 0;
+
+		/*
+		 * The GPA of the PTE under examination, for fault
+		 * reporting: the translated table base plus the entry's
+		 * offset within the page.
+		 */
+		pte_fault_gpa = real_gpa + offset;
 
 		slot = kvm_vcpu_gfn_to_memslot(vcpu, gpa_to_gfn(real_gpa));
 		if (!kvm_is_visible_memslot(slot)) {
@@ -549,6 +558,7 @@ error:
 	walker->fault.vector = PF_VECTOR;
 	walker->fault.error_code_valid = true;
 	walker->fault.error_code = errcode;
+	walker->fault.gpa_page_fault = pte_fault_gpa;
 
 #if PTTYPE == PTTYPE_EPT
 	/*

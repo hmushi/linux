@@ -25,6 +25,14 @@ struct x86_exception {
 	u16 error_code;
 	bool nested_page_fault;
 	u64 address; /* cr2 or nested page fault gpa */
+	/*
+	 * On a fault from the guest page-table walker: the GPA of the
+	 * page-table entry whose examination or A/D write-back failed,
+	 * or INVALID_GPA when the walk failed before reaching a PTE.
+	 * Only the walker's error path writes this; a fault raised
+	 * anywhere else leaves no meaningful value here.
+	 */
+	u64 gpa_page_fault;
 	u8 async_page_fault;
 	unsigned long exit_qualification;
 #define KVM_X86_UNMAPPED_PTE_GPA	BIT(0)
