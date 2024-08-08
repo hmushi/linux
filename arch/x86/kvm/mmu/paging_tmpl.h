@@ -333,6 +333,7 @@ static int FNAME(walk_addr_generic)(struct guest_walker *walker,
 	const int user_fault  = access & PFERR_USER_MASK;
 	const int fetch_fault = access & PFERR_FETCH_MASK;
 	const int set_accessed = flags & PWALK_SET_ACCESSED;
+	const int set_dirty = flags & PWALK_SET_DIRTY;
 	/*
 	 * Note! Track the error_code that's common to legacy shadow paging
 	 * and NPT shadow paging as a u16 to guard against unintentionally
@@ -496,7 +497,7 @@ retry_walk:
 
 	if (unlikely(set_accessed && !accessed_dirty)) {
 		ret = FNAME(update_accessed_dirty_bits)(vcpu, w, walker,
-							addr, write_fault);
+							addr, write_fault && set_dirty);
 		if (unlikely(ret < 0))
 			goto error;
 		else if (ret)
