@@ -355,8 +355,9 @@ static int FNAME(walk_addr_generic)(struct guest_walker *walker,
 	const int fetch_fault = access & PFERR_FETCH_MASK;
 	const int set_accessed = flags & PWALK_SET_ACCESSED;
 	const int set_dirty = flags & PWALK_SET_DIRTY;
+	const int force_set = flags & PWALK_FORCE_SET_ACCESSED;
 	u16 errcode = 0;
-	gpa_t real_gpa;
+	gpa_t real_gpa = INVALID_GPA;
 	gpa_t pte_fault_gpa = INVALID_GPA;
 	gfn_t gfn;
 
@@ -368,10 +369,15 @@ retry_walk:
 	have_ad       = PT_HAVE_ACCESSED_DIRTY(mmu);
 
 	/*
-	 * The PDPTE check below can fail the walk before fault.flags has
-	 * been written: the error label does not set it, and the fault
-	 * is copied wholesale into the caller's exception.
+	 * The PDPTE check below can fail the walk before any level has
+	 * been visited.  Initialise max_level now so that the force_set
+	 * loop at late_exit (max_level down to level + 1) covers no
+	 * levels on that path; the assignment after the check narrows it
+	 * for walks which pass.  fault.flags must likewise be written
+	 * before that check: the error label does not set it, and the
+	 * fault is copied wholesale into the caller's exception.
 	 */
+	walker->max_level = walker->level;
 	walker->fault.flags = 0;
 	pte_fault_gpa = INVALID_GPA;
 
@@ -438,7 +444,7 @@ retry_walk:
 		 * fields.
 		 */
 		if (unlikely(real_gpa == INVALID_GPA))
-			return 0;
+			goto late_exit;
 
 		/*
 		 * The GPA of the PTE under examination, for fault
@@ -527,7 +533,7 @@ retry_walk:
 	real_gpa = kvm_translate_gpa(vcpu, mmu, gfn_to_gpa(gfn), access, flags,
 				     &walker->fault);
 	if (real_gpa == INVALID_GPA)
-		return 0;
+		goto late_exit;
 
 	walker->gfn = real_gpa >> PAGE_SHIFT;
 
@@ -599,6 +605,18 @@ error:
 	walker->fault.async_page_fault = false;
 
 	trace_kvm_mmu_walker_error(walker->fault.error_code);
+
+late_exit:
+	if (force_set) {
+		/*
+		 * Don't set the accessed bit for the page table that caused the
+		 * walk to fail.
+		 */
+		++walker->level;
+		FNAME(update_accessed_dirty_bits)(vcpu, mmu, walker, addr,
+						  false);
+		--walker->level;
+	}
 	return 0;
 }
 
