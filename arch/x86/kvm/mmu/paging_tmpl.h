@@ -334,6 +334,7 @@ static int FNAME(walk_addr_generic)(struct guest_walker *walker,
 	const int fetch_fault = access & PFERR_FETCH_MASK;
 	const int set_accessed = flags & PWALK_SET_ACCESSED;
 	const int set_dirty = flags & PWALK_SET_DIRTY;
+	const int force_set = flags & PWALK_FORCE_SET_ACCESSED;
 	/*
 	 * Note! Track the error_code that's common to legacy shadow paging
 	 * and NPT shadow paging as a u16 to guard against unintentionally
@@ -407,7 +408,7 @@ retry_walk:
 					     flags, &walker->fault, 0);
 
 		if (unlikely(real_gpa == INVALID_GPA))
-			return 0;
+			goto late_exit;
 
 		slot = kvm_vcpu_gfn_to_memslot(vcpu, gpa_to_gfn(real_gpa));
 		if (!kvm_is_visible_memslot(slot)) {
@@ -480,7 +481,7 @@ retry_walk:
 				     access | PFERR_GUEST_FINAL_MASK,
 				     flags, &walker->fault, walker->pte_access);
 	if (real_gpa == INVALID_GPA)
-		return 0;
+		goto late_exit;
 
 	walker->gfn = real_gpa >> PAGE_SHIFT;
 
@@ -579,6 +580,18 @@ error:
 #endif
 
 	trace_kvm_mmu_walker_error(walker->fault.error_code);
+
+late_exit:
+	if (force_set) {
+		/*
+		 * Don't set the accessed bit for the page table that caused the
+		 * walk to fail.
+		 */
+		++walker->level;
+		FNAME(update_accessed_dirty_bits)(vcpu, w, walker, addr,
+						  false);
+		--walker->level;
+	}
 	return 0;
 }
 
