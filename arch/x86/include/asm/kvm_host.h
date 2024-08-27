@@ -757,6 +757,9 @@ struct kvm_vcpu_hv {
 	 */
 	u64 vtl_entry_rax;
 	u64 vtl_entry_rcx;
+
+	bool suspended;
+	int waiting_on;
 };
 
 struct kvm_hypervisor_cpuid {
