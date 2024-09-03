@@ -249,6 +249,8 @@ enum x86_intercept_stage;
 #define PWALK_FORCE_SET_ACCESSED	BIT(2)
 #define PWALK_SET_ALL	(PWALK_SET_ACCESSED | PWALK_SET_DIRTY)
 
+#define PWALK_STATUS_READ_ONLY_PTE_GPA BIT(0)
+
 struct kvm_kernel_irqfd;
 struct kvm_kernel_irq_routing_entry;
 
