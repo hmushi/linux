@@ -198,7 +198,8 @@ static inline unsigned FNAME(gpte_access)(u64 gpte)
 static int FNAME(update_accessed_dirty_bits)(struct kvm_vcpu *vcpu,
 					     struct kvm_mmu *mmu,
 					     struct guest_walker *walker,
-					     gpa_t addr, int write_fault)
+					     gpa_t addr, int write_fault,
+					     u16 *status)
 {
 	unsigned level, index;
 	pt_element_t pte, orig_pte;
@@ -334,10 +335,15 @@ static bool FNAME(walk_abort_fault)(struct kvm_vcpu *vcpu,
 
 /*
  * Fetch a guest pte for a guest virtual address, or for an L2's GPA.
+ *
+ * PWALK_STATUS_* bits are only ever OR'd into @status, both by this
+ * walk and by the nested inner walks it performs through
+ * kvm_translate_gpa(); the outermost caller zeroes it.
  */
 static int FNAME(walk_addr_generic)(struct guest_walker *walker,
 				    struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
-				    gpa_t addr, u64 access, u64 flags)
+				    gpa_t addr, u64 access, u64 flags,
+				    u16 *status)
 {
 	int ret;
 	pt_element_t pte;
@@ -431,7 +437,8 @@ retry_walk:
 		walker->pte_gpa[walker->level - 1] = pte_gpa;
 
 		real_gpa = kvm_translate_gpa(vcpu, mmu, gfn_to_gpa(table_gfn),
-					     nested_access, flags, &walker->fault);
+					     nested_access, flags, &walker->fault,
+					     status);
 
 		/*
 		 * FIXME: This can happen if emulation (for of an INS/OUTS
@@ -531,7 +538,7 @@ retry_walk:
 #endif
 
 	real_gpa = kvm_translate_gpa(vcpu, mmu, gfn_to_gpa(gfn), access, flags,
-				     &walker->fault);
+				     &walker->fault, status);
 	if (real_gpa == INVALID_GPA)
 		goto late_exit;
 
@@ -550,7 +557,8 @@ retry_walk:
 
 	if (unlikely(set_accessed && !accessed_dirty)) {
 		ret = FNAME(update_accessed_dirty_bits)(vcpu, mmu, walker,
-							addr, write_fault && set_dirty);
+							addr, write_fault && set_dirty,
+							status);
 		if (unlikely(ret < 0))
 			goto error;
 		else if (ret)
@@ -614,7 +622,7 @@ late_exit:
 		 */
 		++walker->level;
 		FNAME(update_accessed_dirty_bits)(vcpu, mmu, walker, addr,
-						  false);
+						  false, status);
 		--walker->level;
 	}
 	return 0;
@@ -625,7 +633,7 @@ static int FNAME(walk_addr)(struct guest_walker *walker,
 			    u64 flags)
 {
 	return FNAME(walk_addr_generic)(walker, vcpu, vcpu->arch.mmu, addr,
-					access, flags);
+					access, flags, NULL);
 }
 
 static bool
@@ -966,7 +974,7 @@ static gpa_t FNAME(get_level1_sp_gpa)(struct kvm_mmu_page *sp)
 /* Note, @addr is a GPA when gva_to_gpa() translates an L2 GPA to an L1 GPA. */
 static gpa_t FNAME(gva_to_gpa)(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
 			       gpa_t addr, u64 access, u64 flags,
-			       struct x86_exception *exception)
+			       struct x86_exception *exception, u16 *status)
 {
 	struct guest_walker walker;
 	gpa_t gpa = INVALID_GPA;
@@ -977,7 +985,8 @@ static gpa_t FNAME(gva_to_gpa)(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
 	WARN_ON_ONCE((addr >> 32) && mmu == vcpu->arch.walk_mmu);
 #endif
 
-	r = FNAME(walk_addr_generic)(&walker, vcpu, mmu, addr, access, flags);
+	r = FNAME(walk_addr_generic)(&walker, vcpu, mmu, addr, access, flags,
+				     status);
 
 	if (r) {
 		gpa = gfn_to_gpa(walker.gfn);
