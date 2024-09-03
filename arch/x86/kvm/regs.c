@@ -167,7 +167,8 @@ int load_pdptrs(struct kvm_vcpu *vcpu, unsigned long cr3)
 	 */
 	real_gpa = kvm_translate_gpa(vcpu, w, gfn_to_gpa(pdpt_gfn),
 				     PFERR_USER_MASK | PFERR_WRITE_MASK |
-				     PFERR_GUEST_PAGE_MASK, PWALK_SET_ALL, NULL, 0);
+				     PFERR_GUEST_PAGE_MASK, PWALK_SET_ALL, NULL,
+				     NULL, 0);
 	if (real_gpa == INVALID_GPA)
 		return 0;
 

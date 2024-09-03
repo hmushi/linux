@@ -7473,7 +7473,7 @@ __init int nested_vmx_hardware_setup(int (*exit_handlers[])(struct kvm_vcpu *))
 static gpa_t vmx_translate_nested_gpa(struct kvm_vcpu *vcpu, gpa_t gpa,
 				      u64 access, u64 flags,
 				      struct x86_exception *exception,
-				      u64 pte_access)
+				      u16 *status, u64 pte_access)
 {
 	struct kvm_pagewalk *w = &vcpu->arch.ngpa_walk;
 
@@ -7488,7 +7488,7 @@ static gpa_t vmx_translate_nested_gpa(struct kvm_vcpu *vcpu, gpa_t gpa,
 	if ((pte_access & ACC_USER_MASK) && (access & PFERR_GUEST_FINAL_MASK))
 		access |= PFERR_USER_MASK;
 
-	return w->gva_to_gpa(vcpu, w, gpa, access, flags, exception);
+	return w->gva_to_gpa(vcpu, w, gpa, access, flags, exception, status);
 }
 
 struct kvm_x86_nested_ops vmx_nested_ops __initdata = {

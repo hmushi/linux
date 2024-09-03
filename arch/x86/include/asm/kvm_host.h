@@ -500,7 +500,7 @@ struct kvm_pagewalk {
 				  bool from_hardware);
 	gpa_t (*gva_to_gpa)(struct kvm_vcpu *vcpu, struct kvm_pagewalk *w,
 			    gpa_t gva_or_gpa, u64 access, u64 flags,
-			    struct x86_exception *exception);
+			    struct x86_exception *exception, u16 *status);
 
 	union kvm_cpu_role cpu_role;
 	struct kvm_page_format fmt;
@@ -1799,7 +1799,7 @@ struct kvm_x86_nested_ops {
 	gpa_t (*translate_nested_gpa)(struct kvm_vcpu *vcpu, gpa_t gpa,
 				      u64 access, u64 flags,
 				      struct x86_exception *exception,
-				      u64 pte_access);
+				      u16 *status, u64 pte_access);
 
 	int (*enable_evmcs)(struct kvm_vcpu *vcpu,
 			    uint16_t *vmcs_version);
