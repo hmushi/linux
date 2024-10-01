@@ -118,6 +118,8 @@ struct kvm_vcpu_hv {
 
 	bool suspended;
 	int waiting_on;
+
+	int tlb_flush_inhibit;
 };
 
 /* "Hv#1" signature */
