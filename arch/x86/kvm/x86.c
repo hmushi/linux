@@ -4950,6 +4950,7 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_HYPERV_FORWARD_HCALL:
 	case KVM_CAP_HYPERV_VTL_SWITCH:
 	case KVM_CAP_HYPERV_REG_INTERCEPT:
+	case KVM_CAP_HYPERV_TLB_FLUSH_INHIBIT:
 #endif
 	case KVM_CAP_HCALL_FAULT_EXIT:
 	case KVM_CAP_PCI_SEGMENT:
@@ -6372,6 +6373,7 @@ bool kvm_arch_is_vcpu_plane_ioctl(unsigned ioctl)
 {
 	switch (ioctl) {
 	case KVM_ENABLE_CAP:
+	case KVM_HYPERV_SET_TLB_FLUSH_INHIBIT:
 	case KVM_SET_GUEST_DEBUG:
 	case KVM_GET_DEBUGREGS:
 	case KVM_SET_DEBUGREGS:
@@ -6401,6 +6403,44 @@ bool kvm_arch_is_vcpu_plane_ioctl(unsigned ioctl)
 		return false;
 	}
 }
+
+#ifdef CONFIG_KVM_HYPERV
+static int kvm_vcpu_ioctl_set_tlb_flush_inhibit(struct kvm_vcpu *vcpu,
+						struct kvm_hyperv_tlb_flush_inhibit *set)
+{
+	if (set->flags || set->inhibit > KVM_HYPERV_INHIBIT_TLB_FLUSH ||
+	    memchr_inv(set->reserved, 0, sizeof(set->reserved)))
+		return -EINVAL;
+
+	if (!to_hv_vcpu(vcpu)) {
+		int r = kvm_hv_vcpu_init(vcpu);
+
+		if (r)
+			return r;
+	}
+
+	if (set->inhibit == READ_ONCE(to_hv_vcpu(vcpu)->tlb_flush_inhibit))
+		return 0;
+
+	WRITE_ONCE(to_hv_vcpu(vcpu)->tlb_flush_inhibit, set->inhibit);
+
+	/*
+	 * synchronize_srcu() ensures that:
+	 * - On inhibit, all concurrent TLB flushes finished before this ioctl
+	 *   exits.
+	 * - On uninhibit, there are no longer vCPUs being suspended due to this
+	 *   inhibit.
+	 * This function can't race with itself, because vCPU IOCTLs are
+	 * serialized, so if the inhibit bit is already the desired value this
+	 * synchronization has already happened.
+	 */
+	synchronize_srcu(&vcpu->kvm->srcu);
+	if (!set->inhibit)
+		kvm_hv_vcpu_unsuspend_tlb_flush(vcpu);
+
+	return 0;
+}
+#endif
 
 long kvm_arch_vcpu_ioctl(struct file *filp,
 			 unsigned int ioctl, unsigned long arg)
@@ -6872,6 +6912,17 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
 			goto out;
 		r = kvm_x86_ops.vcpu_mem_enc_ioctl(vcpu, argp);
 		break;
+#ifdef CONFIG_KVM_HYPERV
+	case KVM_HYPERV_SET_TLB_FLUSH_INHIBIT: {
+		struct kvm_hyperv_tlb_flush_inhibit set;
+
+		r = -EFAULT;
+		if (copy_from_user(&set, argp, sizeof(set)))
+			goto out;
+		r = kvm_vcpu_ioctl_set_tlb_flush_inhibit(vcpu, &set);
+		break;
+	}
+#endif
 	default:
 		r = -EINVAL;
 	}
@@ -12212,6 +12263,18 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_vcpu_has_events);
 
 int kvm_arch_vcpu_runnable(struct kvm_vcpu *vcpu)
 {
+	/*
+	 * A suspended vCPU must not be reported runnable for its own
+	 * pending events: vcpu_run() cannot enter the guest to consume
+	 * them while the suspension lasts, so "runnable" would just spin
+	 * vcpu_block() at 100% host CPU.  The events stay pending and the
+	 * unsuspend side kicks the real sleep.  Higher-plane work still
+	 * wakes the vCPU: kvm_hv_vtl_interrupt_exit() runs even for a
+	 * suspended lower VTL.
+	 */
+	if (kvm_hv_vcpu_suspended(vcpu))
+		return !!kvm_higher_plane_with_event(vcpu);
+
 	return kvm_vcpu_running(vcpu) || vcpu->arch.pv.pv_unhalted ||
 	       kvm_vcpu_has_events(vcpu) ||
 	       kvm_higher_plane_with_event(vcpu);
