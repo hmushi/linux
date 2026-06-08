@@ -1478,7 +1478,7 @@ static void svm_prepare_host_switch(struct kvm_vcpu *vcpu)
 
 static void svm_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 {
-	if (vcpu->scheduled_out && !kvm_pause_in_guest(vcpu->kvm))
+	if (kvm_vcpu_scheduled_out(vcpu) && !kvm_pause_in_guest(vcpu->kvm))
 		shrink_ple_window(vcpu);
 
 	if (kvm_vcpu_apicv_active(vcpu))
@@ -2820,7 +2820,7 @@ static bool svm_pat_accesses_gpat(struct kvm_vcpu *vcpu, bool from_host)
 	 * KVM_GET/SET_NESTED_STATE are independent of each other and can
 	 * be ordered arbitrarily during save and restore.
 	 */
-	WARN_ON_ONCE(from_host && vcpu->wants_to_run);
+	WARN_ON_ONCE(from_host && kvm_vcpu_wants_to_run(vcpu));
 	return !from_host && is_guest_mode(vcpu) && l2_has_separate_pat(vcpu);
 }
 
