@@ -160,6 +160,7 @@ KVM_X86_OP_OPTIONAL_RET0(gmem_max_mapping_level)
 #endif
 KVM_X86_OP(alloc_plane)
 KVM_X86_OP(free_plane)
+KVM_X86_OP(max_planes)
 
 #undef KVM_X86_OP
 #undef KVM_X86_OP_OPTIONAL

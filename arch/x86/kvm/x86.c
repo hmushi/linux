@@ -323,9 +323,15 @@ static struct kmem_cache *kvm_alloc_emulator_cache(void)
 
 static int emulator_fix_hypercall(struct x86_emulate_ctxt *ctxt);
 
-unsigned kvm_arch_max_planes(struct kvm *kvm)
+unsigned kvm_x86_default_max_planes(struct kvm *kvm)
 {
 	return 1;
+}
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_x86_default_max_planes);
+
+unsigned kvm_arch_max_planes(struct kvm *kvm)
+{
+	return kvm_x86_call(max_planes)(kvm);
 }
 
 struct kvm_plane *x86_alloc_plane(void)
