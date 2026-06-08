@@ -323,6 +323,11 @@ static struct kmem_cache *kvm_alloc_emulator_cache(void)
 
 static int emulator_fix_hypercall(struct x86_emulate_ctxt *ctxt);
 
+unsigned kvm_arch_max_planes(struct kvm *kvm)
+{
+	return 1;
+}
+
 /*
  * Handle a fault on a hardware virtualization (VMX or SVM) instruction.
  *
