@@ -280,7 +280,7 @@ struct kvm_page_fault {
 	unsigned long mmu_seq;
 	kvm_pfn_t pfn;
 	struct page *refcounted_page;
-	bool map_writable;
+	u8 host_access;
 
 	/*
 	 * Indicates the guest is trying to write a gfn that contains one or
@@ -360,7 +360,7 @@ static inline int kvm_mmu_do_page_fault(struct kvm_vcpu *vcpu, gpa_t cr2_or_gpa,
 		.is_private = err & PFERR_PRIVATE_ACCESS,
 
 		.pfn = KVM_PFN_ERR_FAULT,
-		.map_writable = true,
+		.host_access = ACC_ALL,
 	};
 	int r;
 
