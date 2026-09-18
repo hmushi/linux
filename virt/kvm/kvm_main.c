@@ -3365,6 +3365,11 @@ int __kvm_vcpu_map(struct kvm_vcpu *vcpu, gfn_t gfn, struct kvm_host_map *map,
 		.pin = true,
 	};
 
+	if (!kvm_mem_attributes_may_read_gfn(vcpu->kvm, gfn))
+		return -EFAULT;
+	if (writable && !kvm_mem_attributes_may_write_gfn(vcpu->kvm, gfn))
+		return -EFAULT;
+
 	map->pinned_page = NULL;
 	map->page = NULL;
 	map->hva = NULL;
