@@ -1446,6 +1446,7 @@ struct kvm_arch {
 	bool has_protected_state;
 	bool has_protected_eoi;
 	bool pre_fault_allowed;
+	bool hcall_fault_exit;
 	struct hlist_head *mmu_page_hash;
 	struct list_head active_mmu_pages;
 	struct kvm_possible_nx_huge_pages possible_nx_huge_pages[KVM_NR_MMU_TYPES];
