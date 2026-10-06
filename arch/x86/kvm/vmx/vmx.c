@@ -7125,8 +7125,14 @@ int vmx_sync_pir_to_irr(struct kvm_vcpu *vcpu)
 	 * exit-on-interrupt on (in vmcs12), then the higher priority IRQ will
 	 * trigger a nested VM-Exit, at which point KVM will re-evaluate L1's
 	 * pending IRQs.
+	 *
+	 * RVI lives in the loaded VMCS.  A plane vCPU that is not running has
+	 * its VMCS unloaded while a sibling plane's is active, so writing RVI
+	 * would land in the wrong VMCS; the sync at its next entry sets RVI
+	 * from the IRR.
 	 */
-	if (!is_guest_mode(vcpu) && kvm_vcpu_apicv_active(vcpu))
+	if (!is_guest_mode(vcpu) && kvm_vcpu_apicv_active(vcpu) &&
+	    vcpu == kvm_get_running_vcpu())
 		vmx_set_rvi(max_irr);
 	else if (max_irr_is_from_pir)
 		kvm_make_request(KVM_REQ_EVENT, vcpu);

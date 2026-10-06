@@ -7945,6 +7945,23 @@ out:
 }
 
 /*
+ * Does an idle plane have an interrupt to deliver?  Its expired timers have
+ * not raised theirs yet, and a posted interrupt sits in the PIR, which
+ * hardware delivers only to the running plane: raise and sync them first.
+ */
+static bool kvm_plane_has_interrupt(struct kvm_vcpu *v)
+{
+	if (lapic_in_kernel(v))
+		kvm_inject_apic_timer_irqs(v);
+#ifdef CONFIG_KVM_HYPERV
+	if (kvm_check_request(KVM_REQ_HV_STIMER, v))
+		kvm_hv_process_stimers(v);
+#endif
+
+	return kvm_cpu_has_interrupt(v);
+}
+
+/*
  * Planes listed in kvm_run->req_exit_planes whose vCPU has an injectable
  * interrupt.  The current plane is never reported: its interrupts are
  * delivered the normal way.  Only used with KVM_CAP_PLANES_USERSPACE_SWITCH.
@@ -7963,7 +7980,7 @@ static u16 kvm_pending_exit_planes(struct kvm_vcpu *vcpu)
 	for_each_set_bit(i, (unsigned long *)&req, KVM_MAX_PLANES) {
 		struct kvm_vcpu *v = common->vcpus[i];
 
-		if (v && kvm_cpu_has_injectable_intr(v))
+		if (v && kvm_plane_has_interrupt(v))
 			pending |= BIT(i);
 	}
 
@@ -7994,7 +8011,7 @@ static inline bool kvm_check_plane0_events(struct kvm_vcpu *vcpu)
 
 	vcpu_plane0 = vcpu->common->vcpus[0];
 
-	return kvm_cpu_has_injectable_intr(vcpu_plane0) ||
+	return kvm_plane_has_interrupt(vcpu_plane0) ||
 		vcpu_plane0->arch.nmi_pending ||
 		vcpu_plane0->arch.smi_pending;
 }
