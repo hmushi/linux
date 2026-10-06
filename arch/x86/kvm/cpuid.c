@@ -566,7 +566,7 @@ static int kvm_set_cpuid(struct kvm_vcpu *vcpu, struct kvm_cpuid_entry2 *e2,
 #ifdef CONFIG_KVM_HYPERV
 	if (kvm_cpuid_has_hyperv(vcpu)) {
 		vcpu_for_each_plane(common, i, v) {
-			r = kvm_hv_vcpu_init(vcpu);
+			r = kvm_hv_vcpu_init(v);
 			if (r)
 				goto err;
 		}

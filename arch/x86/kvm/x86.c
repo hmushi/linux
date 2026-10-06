@@ -9747,6 +9747,16 @@ int kvm_arch_vcpu_create(struct kvm_vcpu *vcpu)
 	if (r)
 		goto free_guest_fpu;
 
+#ifdef CONFIG_KVM_HYPERV
+	/* The planes share CPUID; kvm_vcpu_after_set_cpuid() expects the context. */
+	if (vcpu->plane_level &&
+	    vcpu->common->vcpus[0]->arch.hyperv_enabled) {
+		r = kvm_hv_vcpu_init(vcpu);
+		if (r)
+			goto free_guest_fpu;
+	}
+#endif
+
 	kvm_xen_init_vcpu(vcpu);
 	vcpu_load(vcpu);
 	kvm_vcpu_after_set_cpuid(vcpu);
