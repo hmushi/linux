@@ -306,9 +306,27 @@ static void *vcpu_worker(void *data)
 }
 
 /*
- * Set up the pvclock page and validate that KVM periodically updates the
- * 'tsc_timestamp' field. Subsequently, make the pvclock page non-writable and
- * verify that the 'tsc_timestamp' field is no longer updated.
+ * With a stable host TSC, KVM rewrites the pvclock page only when something
+ * asks for it; KVM_SET_CLOCK does, on every vCPU.  Ask ten times over a
+ * second so the test does not depend on vCPU migration or an unstable TSC.
+ */
+static void force_pvclock_updates(struct kvm_vm *vm)
+{
+	struct kvm_clock_data clock;
+	int i;
+
+	for (i = 0; i < 10; i++) {
+		vm_ioctl(vm, KVM_GET_CLOCK, &clock);
+		clock.flags = 0;
+		vm_ioctl(vm, KVM_SET_CLOCK, &clock);
+		usleep(msecs_to_usecs(100));
+	}
+}
+
+/*
+ * Set up the pvclock page and validate that KVM updates the 'tsc_timestamp'
+ * field. Subsequently, make the pvclock page non-writable and verify that the
+ * 'tsc_timestamp' field is no longer updated.
  */
 static void test_side_channel_pvclock(struct kvm_vcpu *vcpu)
 {
@@ -321,12 +339,12 @@ static void test_side_channel_pvclock(struct kvm_vcpu *vcpu)
 	test_data->vaddr = vaddr + offsetof(struct pvclock_vcpu_time_info, tsc_timestamp);
 
 	pthread_create(&vcpu_thread, NULL, vcpu_worker, test_data);
-	usleep(msecs_to_usecs(1000));
+	force_pvclock_updates(vm);
 	TEST_ASSERT_EQ(pthread_tryjoin_np(vcpu_thread, NULL), 0);
 
 	vm_set_memory_attributes(vm, paddr, vm->page_size, KVM_MEMORY_ATTRIBUTE_NW);
 	pthread_create(&vcpu_thread, NULL, vcpu_worker, test_data);
-	usleep(msecs_to_usecs(1000));
+	force_pvclock_updates(vm);
 	TEST_ASSERT_EQ(pthread_tryjoin_np(vcpu_thread, NULL), EBUSY);
 
 	/* Force the 'monitor_address' guest operation to finish */
