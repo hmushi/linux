@@ -345,6 +345,7 @@ int kvm_set_routing_entry(struct kvm *kvm,
 		e->set = kvm_hv_synic_set_irq;
 		e->hv_sint.vcpu = ue->u.hv_sint.vcpu;
 		e->hv_sint.sint = ue->u.hv_sint.sint;
+		e->hv_sint.plane_level = plane_level;
 		break;
 #endif
 #ifdef CONFIG_KVM_XEN

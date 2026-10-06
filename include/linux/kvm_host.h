@@ -194,6 +194,8 @@ static inline bool kvm_is_error_gpa(gpa_t gpa)
 
 bool kvm_make_vcpus_request_mask(struct kvm *kvm, unsigned int req,
 				 unsigned long *vcpu_bitmap);
+bool kvm_make_plane_vcpus_request_mask(struct kvm_plane *plane, unsigned int req,
+				       unsigned long *vcpu_bitmap);
 bool kvm_make_all_cpus_request(struct kvm *kvm, unsigned int req);
 
 #define KVM_USERSPACE_IRQ_SOURCE_ID		0
@@ -760,6 +762,7 @@ struct kvm_s390_adapter_int {
 struct kvm_hv_sint {
 	u32 vcpu;
 	u32 sint;
+	u32 plane_level;
 };
 
 struct kvm_xen_evtchn {

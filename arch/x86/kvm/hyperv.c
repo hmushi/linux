@@ -187,7 +187,12 @@ static int synic_set_sint(struct kvm_vcpu_hv_synic *synic, int sint,
 	return 0;
 }
 
-static struct kvm_vcpu *get_vcpu_by_vpidx(struct kvm *kvm, u32 vpidx)
+/*
+ * A VP index names a VP, which has one vCPU per plane.  Callers pass the
+ * plane of the VTL they target: the caller's own for a hypercall, the plane
+ * a SINT route was installed on for interrupt delivery.
+ */
+static struct kvm_vcpu *get_vcpu_by_vpidx(struct kvm_plane *plane, u32 vpidx)
 {
 	struct kvm_vcpu *vcpu = NULL;
 	unsigned long i;
@@ -195,22 +200,25 @@ static struct kvm_vcpu *get_vcpu_by_vpidx(struct kvm *kvm, u32 vpidx)
 	if (vpidx >= KVM_MAX_VCPUS)
 		return NULL;
 
-	vcpu = kvm_get_vcpu(kvm, vpidx);
+	vcpu = plane_get_vcpu(plane, vpidx);
 	if (vcpu && kvm_hv_get_vpindex(vcpu) == vpidx)
 		return vcpu;
-	kvm_for_each_vcpu(i, vcpu, kvm)
+	plane_for_each_vcpu(i, vcpu, plane)
 		if (kvm_hv_get_vpindex(vcpu) == vpidx)
 			return vcpu;
 	return NULL;
 }
 
-static struct kvm_vcpu_hv_synic *synic_get(struct kvm *kvm, u32 vpidx)
+static struct kvm_vcpu_hv_synic *synic_get(struct kvm_plane *plane, u32 vpidx)
 {
 	struct kvm_vcpu_hv_synic *synic;
 	struct kvm_vcpu_hv *hv_vcpu;
 	struct kvm_vcpu *vcpu;
 
-	vcpu = get_vcpu_by_vpidx(kvm, vpidx);
+	if (!plane)
+		return NULL;
+
+	vcpu = get_vcpu_by_vpidx(plane, vpidx);
 	if (!vcpu)
 		return NULL;
 
@@ -511,7 +519,7 @@ int kvm_hv_synic_set_irq(struct kvm_kernel_irq_routing_entry *e, struct kvm *kvm
 	if (!level)
 		return -1;
 
-	synic = synic_get(kvm, e->hv_sint.vcpu);
+	synic = synic_get(kvm->planes[e->hv_sint.plane_level], e->hv_sint.vcpu);
 	if (!synic)
 		return -EINVAL;
 
@@ -530,11 +538,12 @@ void kvm_hv_synic_send_eoi(struct kvm_vcpu *vcpu, int vector)
 			kvm_hv_notify_acked_sint(vcpu, i);
 }
 
-static int kvm_hv_set_sint_gsi(struct kvm *kvm, u32 vpidx, u32 sint, int gsi)
+static int kvm_hv_set_sint_gsi(struct kvm_plane *plane, u32 vpidx, u32 sint,
+			       int gsi)
 {
 	struct kvm_vcpu_hv_synic *synic;
 
-	synic = synic_get(kvm, vpidx);
+	synic = synic_get(plane, vpidx);
 	if (!synic)
 		return -EINVAL;
 
@@ -557,7 +566,8 @@ void kvm_hv_irq_routing_update(struct kvm *kvm)
 	for (gsi = 0; gsi < irq_rt->nr_rt_entries; gsi++) {
 		hlist_for_each_entry(e, &irq_rt->map[gsi], link) {
 			if (e->type == KVM_IRQ_ROUTING_HV_SINT)
-				kvm_hv_set_sint_gsi(kvm, e->hv_sint.vcpu,
+				kvm_hv_set_sint_gsi(kvm->planes[e->hv_sint.plane_level],
+						    e->hv_sint.vcpu,
 						    e->hv_sint.sint, gsi);
 		}
 	}
@@ -1814,10 +1824,10 @@ int kvm_hv_get_msr_common(struct kvm_vcpu *vcpu, u32 msr, u64 *pdata, bool host)
 		return kvm_hv_get_msr(vcpu, msr, pdata, host);
 }
 
-static void sparse_set_to_vcpu_mask(struct kvm *kvm, u64 *sparse_banks,
+static void sparse_set_to_vcpu_mask(struct kvm_plane *plane, u64 *sparse_banks,
 				    u64 valid_bank_mask, unsigned long *vcpu_mask)
 {
-	struct kvm_hv *hv = to_kvm_hv(kvm);
+	struct kvm_hv *hv = to_kvm_hv(plane->kvm);
 	bool has_mismatch = atomic_read(&hv->num_mismatched_vp_indexes);
 	u64 vp_bitmap[KVM_HV_MAX_SPARSE_VCPU_SET_BITS];
 	struct kvm_vcpu *vcpu;
@@ -1851,7 +1861,7 @@ static void sparse_set_to_vcpu_mask(struct kvm *kvm, u64 *sparse_banks,
 		return;
 
 	bitmap_zero(vcpu_mask, KVM_MAX_VCPUS);
-	kvm_for_each_vcpu(i, vcpu, kvm) {
+	plane_for_each_vcpu(i, vcpu, plane) {
 		if (test_bit(kvm_hv_get_vpindex(vcpu), (unsigned long *)vp_bitmap))
 			__set_bit(i, vcpu_mask);
 	}
@@ -2039,6 +2049,7 @@ static u64 kvm_hv_flush_tlb(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
 	struct kvm_vcpu_hv *hv_vcpu = to_hv_vcpu(vcpu);
 	unsigned long *vcpu_mask = hv_vcpu->vcpu_mask;
 	u64 *sparse_banks = hv_vcpu->sparse_banks;
+	struct kvm_plane *plane = vcpu->plane;
 	struct kvm *kvm = vcpu->kvm;
 	struct hv_tlb_flush_ex flush_ex;
 	struct hv_tlb_flush flush;
@@ -2167,21 +2178,22 @@ static u64 kvm_hv_flush_tlb(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
 	/*
 	 * vcpu->arch.cr3 may not be up-to-date for running vCPUs so we can't
 	 * analyze it here, flush TLB regardless of the specified address space.
+	 * The flush targets the caller's VTL, i.e. the vCPUs of its plane.
 	 */
 	if (all_cpus && !is_guest_mode(vcpu)) {
 		bitmap_zero(vcpu_mask, KVM_MAX_VCPUS);
 
-		kvm_for_each_vcpu(i, v, kvm) {
+		plane_for_each_vcpu(i, v, plane) {
 			if (READ_ONCE(v->arch.hyperv->tlb_flush_inhibit))
 				goto ret_suspend;
 
 			__set_bit(i, vcpu_mask);
 		}
 	} else if (!is_guest_mode(vcpu)) {
-		sparse_set_to_vcpu_mask(kvm, sparse_banks, valid_bank_mask, vcpu_mask);
+		sparse_set_to_vcpu_mask(plane, sparse_banks, valid_bank_mask, vcpu_mask);
 
 		for_each_set_bit(i, vcpu_mask, KVM_MAX_VCPUS) {
-			v = kvm_get_vcpu(kvm, i);
+			v = plane_get_vcpu(plane, i);
 			if (!v) {
 				__clear_bit(i, vcpu_mask);
 				continue;
@@ -2195,7 +2207,7 @@ static u64 kvm_hv_flush_tlb(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
 
 		bitmap_zero(vcpu_mask, KVM_MAX_VCPUS);
 
-		kvm_for_each_vcpu(i, v, kvm) {
+		plane_for_each_vcpu(i, v, plane) {
 			hv_v = to_hv_vcpu_safe(v);
 
 			/*
@@ -2224,13 +2236,13 @@ static u64 kvm_hv_flush_tlb(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
 	}
 
 	for_each_set_bit(i, vcpu_mask, KVM_MAX_VCPUS) {
-		v = kvm_get_vcpu(kvm, i);
+		v = plane_get_vcpu(plane, i);
 
 		hv_tlb_flush_enqueue(v, tlb_flush_entries, hc->rep_cnt,
 				     is_guest_mode(vcpu));
 	}
 
-	kvm_make_vcpus_request_mask(kvm, KVM_REQ_HV_TLB_FLUSH, vcpu_mask);
+	kvm_make_plane_vcpus_request_mask(plane, KVM_REQ_HV_TLB_FLUSH, vcpu_mask);
 
 ret_success:
 	/* We always do full TLB flush, set 'Reps completed' = 'Rep Count' */
@@ -2241,7 +2253,7 @@ ret_suspend:
 	return -EBUSY;
 }
 
-static void kvm_hv_send_ipi_to_many(struct kvm *kvm, u32 vector,
+static void kvm_hv_send_ipi_to_many(struct kvm_plane *plane, u32 vector,
 				    u64 *sparse_banks, u64 valid_bank_mask)
 {
 	struct kvm_lapic_irq irq = {
@@ -2251,7 +2263,7 @@ static void kvm_hv_send_ipi_to_many(struct kvm *kvm, u32 vector,
 	struct kvm_vcpu *vcpu;
 	unsigned long i;
 
-	kvm_for_each_vcpu(i, vcpu, kvm) {
+	plane_for_each_vcpu(i, vcpu, plane) {
 		if (sparse_banks &&
 		    !hv_is_vp_in_sparse_set(kvm_hv_get_vpindex(vcpu),
 					    valid_bank_mask, sparse_banks))
@@ -2262,6 +2274,25 @@ static void kvm_hv_send_ipi_to_many(struct kvm *kvm, u32 vector,
 	}
 }
 
+/*
+ * The byte after the vector of HvCallSendSyntheticClusterIpi(Ex) selects the
+ * target VTL.  Without VSM it is reserved and the IPI goes to the sender's own
+ * VTL, i.e. plane.
+ */
+static struct kvm_plane *kvm_hv_ipi_target_plane(struct kvm_vcpu *vcpu,
+						 u32 reserved)
+{
+	union hv_input_vtl in_vtl = { .as_uint8 = reserved };
+
+	if (!to_kvm_hv(vcpu->kvm)->vsm_enabled || !in_vtl.use_target_vtl)
+		return vcpu->plane;
+
+	if (in_vtl.target_vtl >= KVM_MAX_PLANES)
+		return NULL;
+
+	return vcpu->kvm->planes[in_vtl.target_vtl];
+}
+
 static u64 kvm_hv_send_ipi(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
 {
 	struct kvm_vcpu_hv *hv_vcpu = to_hv_vcpu(vcpu);
@@ -2269,7 +2300,9 @@ static u64 kvm_hv_send_ipi(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
 	struct kvm *kvm = vcpu->kvm;
 	struct hv_send_ipi_ex send_ipi_ex;
 	struct hv_send_ipi send_ipi;
+	struct kvm_plane *plane;
 	u64 valid_bank_mask;
+	int rsvd_shift;
 	u32 vector;
 	bool all_cpus;
 
@@ -2285,13 +2318,16 @@ static u64 kvm_hv_send_ipi(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
 			vector = send_ipi.vector;
 		} else {
 			/* 'reserved' part of hv_send_ipi should be 0 */
-			if (unlikely(hc->ingpa >> 32 != 0))
+			rsvd_shift = to_kvm_hv(kvm)->vsm_enabled ? 40 : 32;
+			if (unlikely(hc->ingpa >> rsvd_shift != 0))
 				return HV_STATUS_INVALID_HYPERCALL_INPUT;
+			send_ipi.reserved = (u8)(hc->ingpa >> 32);
 			sparse_banks[0] = hc->outgpa;
 			vector = (u32)hc->ingpa;
 		}
 		all_cpus = false;
 		valid_bank_mask = BIT_ULL(0);
+		plane = kvm_hv_ipi_target_plane(vcpu, (u8)send_ipi.reserved);
 
 		trace_kvm_hv_send_ipi(vector, sparse_banks[0]);
 	} else {
@@ -2301,9 +2337,11 @@ static u64 kvm_hv_send_ipi(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
 				return HV_STATUS_INVALID_HYPERCALL_INPUT;
 		} else {
 			send_ipi_ex.vector = (u32)hc->ingpa;
+			send_ipi_ex.reserved = (u8)(hc->ingpa >> 32);
 			send_ipi_ex.vp_set.format = hc->outgpa;
 			send_ipi_ex.vp_set.valid_bank_mask = sse128_lo(hc->xmm[0]);
 		}
+		plane = kvm_hv_ipi_target_plane(vcpu, (u8)send_ipi_ex.reserved);
 
 		trace_kvm_hv_send_ipi_ex(send_ipi_ex.vector,
 					 send_ipi_ex.vp_set.format,
@@ -2336,10 +2374,13 @@ check_and_send_ipi:
 	if ((vector < HV_IPI_LOW_VECTOR) || (vector > HV_IPI_HIGH_VECTOR))
 		return HV_STATUS_INVALID_HYPERCALL_INPUT;
 
+	if (!plane)
+		return HV_STATUS_INVALID_PARAMETER;
+
 	if (all_cpus)
-		kvm_hv_send_ipi_to_many(kvm, vector, NULL, 0);
+		kvm_hv_send_ipi_to_many(plane, vector, NULL, 0);
 	else
-		kvm_hv_send_ipi_to_many(kvm, vector, sparse_banks, valid_bank_mask);
+		kvm_hv_send_ipi_to_many(plane, vector, sparse_banks, valid_bank_mask);
 
 ret_success:
 	return HV_STATUS_SUCCESS;
@@ -3141,7 +3182,8 @@ void kvm_hv_vcpu_unsuspend_tlb_flush(struct kvm_vcpu *vcpu)
 
 	bitmap_zero(vcpu_mask, KVM_MAX_VCPUS);
 
-	kvm_for_each_vcpu(i, v, vcpu->kvm) {
+	/* Flushes target the flusher's own plane, so its waiters are there. */
+	plane_for_each_vcpu(i, v, vcpu->plane) {
 		vcpu_hv = to_hv_vcpu(v);
 
 		if (kvm_hv_vcpu_suspended(v) &&
@@ -3155,5 +3197,5 @@ void kvm_hv_vcpu_unsuspend_tlb_flush(struct kvm_vcpu *vcpu)
 		}
 	}
 
-	kvm_make_vcpus_request_mask(vcpu->kvm, KVM_REQ_EVENT, vcpu_mask);
+	kvm_make_plane_vcpus_request_mask(vcpu->plane, KVM_REQ_EVENT, vcpu_mask);
 }
