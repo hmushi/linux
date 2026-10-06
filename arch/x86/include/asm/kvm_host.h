@@ -1099,7 +1099,6 @@ struct kvm_hv {
 	struct mutex hv_lock;
 	u64 hv_guest_os_id;
 	u64 hv_hypercall;
-	u64 hv_tsc_page;
 	enum hv_tsc_page_status hv_tsc_page_status;
 
 	/* Hyper-v based guest crash (NT kernel bugcheck) parameters */
@@ -1194,6 +1193,14 @@ struct kvm_arch_plane {
 	struct mutex apic_map_lock;
 	struct kvm_apic_map __rcu *apic_map;
 	atomic_t apic_map_dirty;
+
+#ifdef CONFIG_KVM_HYPERV
+	/*
+	 * HV_X64_MSR_REFERENCE_TSC is private to each VTL, the reference time
+	 * it exposes is not: every enabled page gets the same contents.
+	 */
+	u64 hv_tsc_page;
+#endif
 };
 
 int kvm_arch_plane_init(struct kvm *kvm, struct kvm_plane *plane,
