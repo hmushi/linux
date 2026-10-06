@@ -24,6 +24,9 @@
 #define XMM_OUT_LO		0xaaaaaaaaaaaaaaaaULL
 #define XMM_OUT_HI		0xbbbbbbbbbbbbbbbbULL
 #define VTL_CALL_RAX		0x0123456789abcdefULL
+#define IPI_VECTOR		0x60
+/* HV_INPUT_VTL: target VTL in bits 3:0, use_target_vtl in bit 4 */
+#define HV_INPUT_VTL(vtl)	(BIT(4) | (vtl))
 
 struct hv_tlb_flush {
 	u64 address_space;
@@ -108,6 +111,23 @@ static void guest_cap_on(gpa_t hcall_gpa, gpa_t input_gpa)
 		     : "memory", "rdx", "r8", "r9", "r10", "r11");
 	GUEST_ASSERT_EQ(rax, VTL_CALL_RAX);
 	GUEST_SYNC(4);
+
+	/*
+	 * In-kernel cluster IPI with a target VTL (byte 4 of the input, fast
+	 * form bits 39:32): the caller's own VTL is allowed, a higher one is
+	 * refused.  An empty processor mask keeps the allowed call a no-op.
+	 */
+	vector = __hyperv_hypercall(HVCALL_SEND_IPI | HV_HYPERCALL_FAST_BIT,
+				    IPI_VECTOR | ((u64)HV_INPUT_VTL(0) << 32), 0,
+				    &status);
+	GUEST_ASSERT(!vector);
+	GUEST_ASSERT_EQ(status & 0xffff, HV_STATUS_SUCCESS);
+
+	vector = __hyperv_hypercall(HVCALL_SEND_IPI | HV_HYPERCALL_FAST_BIT,
+				    IPI_VECTOR | ((u64)HV_INPUT_VTL(1) << 32), 0,
+				    &status);
+	GUEST_ASSERT(!vector);
+	GUEST_ASSERT_EQ(status & 0xffff, HV_STATUS_ACCESS_DENIED);
 
 	GUEST_DONE();
 }
@@ -216,7 +236,7 @@ static void test_cap_on(void)
 	}
 
 	kvm_vm_free(vm);
-	ksft_test_result_pass("VSM hypercall exits and XMM payload\n");
+	ksft_test_result_pass("VSM hypercall exits, XMM payload and IPI target VTL\n");
 }
 
 static bool has_irr(struct kvm_lapic_state *apic, int vector)
