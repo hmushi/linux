@@ -469,9 +469,11 @@ struct kvm_run {
 #define KVM_MEMORY_EXIT_FLAG_WRITE      (1ULL << 1)
 #define KVM_MEMORY_EXIT_FLAG_EXEC       (1ULL << 2)
 #define KVM_MEMORY_EXIT_FLAG_PRIVATE	(1ULL << 3)
+#define KVM_MEMORY_EXIT_FLAG_PLANE	(1ULL << 4)
 			__u64 flags;
 			__u64 gpa;
 			__u64 size;
+			__u8 plane;
 		} memory_fault;
 		/* KVM_EXIT_TDX */
 		struct {
@@ -1679,6 +1681,21 @@ struct kvm_memory_attributes {
 #define KVM_MEMORY_ATTRIBUTE_NW		       (1ULL << 1)
 #define KVM_MEMORY_ATTRIBUTE_NX		       (1ULL << 2)
 #define KVM_MEMORY_ATTRIBUTE_PRIVATE           (1ULL << 3)
+
+/*
+ * Available with KVM_CAP_PLANES > 1.  Restricts one plane's view of guest
+ * memory; the attributes apply to that plane's page tables only.  Only the
+ * NR/NW/NX attributes are accepted.
+ */
+#define KVM_SET_PLANE_MEMORY_ATTRIBUTES	_IOW(KVMIO,  0xd6, struct kvm_plane_memory_attributes)
+
+struct kvm_plane_memory_attributes {
+	__u32 plane;
+	__u32 flags;
+	__u64 address;
+	__u64 size;
+	__u64 attributes;
+};
 
 #define KVM_CREATE_GUEST_MEMFD	_IOWR(KVMIO,  0xd4, struct kvm_create_guest_memfd)
 #define GUEST_MEMFD_FLAG_MMAP		(1ULL << 0)

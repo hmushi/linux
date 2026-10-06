@@ -328,6 +328,7 @@ static int FNAME(walk_addr_generic)(struct guest_walker *walker,
 	bool have_ad;
 	int offset;
 	u64 walk_nx_mask = 0;
+	unsigned long pte_attrs;
 	const int write_fault = access & PFERR_WRITE_MASK;
 	const int user_fault  = access & PFERR_USER_MASK;
 	const int fetch_fault = access & PFERR_FETCH_MASK;
@@ -413,13 +414,15 @@ retry_walk:
 		if (unlikely(kvm_is_error_hva(host_addr)))
 			goto error;
 
-		if (!kvm_mem_attributes_may_read_gfn(vcpu->kvm, gpa_to_gfn(real_gpa))) {
+		/* Guest page tables are walked with the faulting plane's view. */
+		pte_attrs = kvm_get_gfn_attributes(vcpu, gpa_to_gfn(real_gpa));
+		if (!kvm_mem_attributes_may_read(pte_attrs)) {
 			walker->memory_attributes_fault = true;
 			walker->gfn = gpa_to_gfn(real_gpa);
 			goto error;
 		}
 
-		if (!kvm_mem_attributes_may_write_gfn(vcpu->kvm, gpa_to_gfn(real_gpa)))
+		if (!kvm_mem_attributes_may_write(pte_attrs))
 			walker->pte_writable[walker->level - 1] = false;
 
 		ptep_user = (pt_element_t __user *)((void *)host_addr + offset);

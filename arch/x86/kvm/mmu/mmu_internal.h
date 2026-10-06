@@ -241,6 +241,9 @@ struct kvm_page_fault {
 	const bool is_private;
 	const bool nx_huge_page_workaround_enabled;
 
+	/* Set when a per-plane restriction denied the access. */
+	bool plane_denied;
+
 	/*
 	 * Whether a >4KB mapping can be created or is forbidden due to NX
 	 * hugepages.
@@ -346,12 +349,24 @@ enum {
  */
 static_assert(RET_PF_CONTINUE == 0);
 
+/*
+ * VM-wide protections and the restrictions imposed on the faulting plane
+ * combine; a plane never gets more access than the VM allows.
+ */
+static inline unsigned long kvm_get_gfn_attributes(struct kvm_vcpu *vcpu, gfn_t gfn)
+{
+	return kvm_get_memory_attributes(vcpu->kvm, gfn) |
+	       kvm_plane_access_attrs(vcpu->plane, gfn);
+}
+
 static inline void kvm_mmu_prepare_memory_fault_exit(struct kvm_vcpu *vcpu,
 						     struct kvm_page_fault *fault)
 {
 	kvm_prepare_memory_fault_exit(vcpu, fault->gfn << PAGE_SHIFT,
 				      PAGE_SIZE, fault->write, fault->exec,
 				      fault->is_private);
+	if (fault->plane_denied)
+		vcpu->run->memory_fault.flags |= KVM_MEMORY_EXIT_FLAG_PLANE;
 }
 
 int kvm_mmu_max_mapping_level(struct kvm *kvm, struct kvm_page_fault *fault,

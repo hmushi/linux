@@ -878,6 +878,14 @@ struct kvm_plane {
 	/* Per-Plane VCPU array */
 	struct xarray vcpu_array;
 
+	/*
+	 * KVM_MEMORY_ATTRIBUTE_N{R,W,X} restrictions on this plane's view of
+	 * guest memory, one mask per gfn.  Written under kvm->slots_lock, read
+	 * under RCU on the fault path.  Combined with the VM-wide
+	 * kvm->mem_attrs when a vCPU of this plane faults.
+	 */
+	struct xarray access_attr_array;
+
 	struct kvm_arch_plane arch;
 };
 
@@ -1206,6 +1214,24 @@ void vcpu_put(struct kvm_vcpu *vcpu);
 unsigned kvm_arch_max_planes(struct kvm *kvm);
 struct kvm_plane *kvm_alloc_plane(void);
 void kvm_free_plane(struct kvm_plane *plane);
+
+static inline bool kvm_plane_has_access_attrs(struct kvm_plane *plane)
+{
+	return !xa_empty(&plane->access_attr_array);
+}
+
+static inline unsigned long kvm_plane_access_attrs(struct kvm_plane *plane,
+						   gfn_t gfn)
+{
+	if (likely(!kvm_plane_has_access_attrs(plane)))
+		return 0;
+
+	return xa_to_value(xa_load(&plane->access_attr_array, gfn));
+}
+
+/* Called under kvm->slots_lock after [start, end) changed in @plane. */
+void kvm_arch_plane_access_attrs_changed(struct kvm_plane *plane,
+					 gfn_t start, gfn_t end);
 
 #ifdef CONFIG_KVM_IOAPIC
 void kvm_arch_post_irq_ack_notifier_list_update(struct kvm *kvm);
@@ -2714,6 +2740,7 @@ static inline void kvm_prepare_memory_fault_exit(struct kvm_vcpu *vcpu,
 	vcpu->run->exit_reason = KVM_EXIT_MEMORY_FAULT;
 	vcpu->run->memory_fault.gpa = gpa;
 	vcpu->run->memory_fault.size = size;
+	vcpu->run->memory_fault.plane = vcpu->plane_level;
 
 	vcpu->run->memory_fault.flags = 0;
 

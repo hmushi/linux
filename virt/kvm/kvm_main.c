@@ -1240,6 +1240,7 @@ static struct kvm_plane *kvm_create_plane(struct kvm *kvm, unsigned plane_level)
 	plane->level = plane_level;
 
 	xa_init(&plane->vcpu_array);
+	xa_init(&plane->access_attr_array);
 
 	if (kvm_arch_plane_init(kvm, plane, plane_level))
 		goto out_free_plane;
@@ -1257,6 +1258,7 @@ out_free_plane:
 static void kvm_destroy_one_plane(struct kvm_plane *plane)
 {
 	kvm_arch_plane_destroy(plane);
+	xa_destroy(&plane->access_attr_array);
 	kvm_free_plane(plane);
 }
 
@@ -2860,6 +2862,83 @@ bool kvm_mem_attributes_valid(struct kvm *kvm, unsigned long attrs)
 		return false;
 
 	return true;
+}
+
+void __weak kvm_arch_plane_access_attrs_changed(struct kvm_plane *plane,
+						gfn_t start, gfn_t end)
+{
+}
+
+static int kvm_plane_set_access_attrs(struct kvm_plane *plane, gfn_t start,
+				      gfn_t end, unsigned long attrs)
+{
+	struct kvm *kvm = plane->kvm;
+	void *entry = attrs ? xa_mk_value(attrs) : NULL;
+	gfn_t gfn;
+	int r = 0;
+
+	mutex_lock(&kvm->slots_lock);
+
+	/*
+	 * Reserve every slot first so the store loop cannot fail half way
+	 * and leave a gap in the protected range.  Clearing never allocates.
+	 */
+	if (entry) {
+		for (gfn = start; gfn < end; gfn++) {
+			r = xa_reserve(&plane->access_attr_array, gfn,
+				       GFP_KERNEL_ACCOUNT);
+			if (r)
+				goto out_unlock;
+			cond_resched();
+		}
+	}
+
+	for (gfn = start; gfn < end; gfn++) {
+		r = xa_err(xa_store(&plane->access_attr_array, gfn, entry,
+				    GFP_KERNEL_ACCOUNT));
+		if (KVM_BUG_ON(r, kvm))
+			goto out_unlock;
+		cond_resched();
+	}
+
+	kvm_arch_plane_access_attrs_changed(plane, start, end);
+
+out_unlock:
+	mutex_unlock(&kvm->slots_lock);
+	return r;
+}
+
+static int kvm_vm_ioctl_set_plane_mem_attributes(struct kvm *kvm,
+						 struct kvm_plane_memory_attributes *attrs)
+{
+	struct kvm_plane *plane;
+	gfn_t start, end;
+
+	if (attrs->flags)
+		return -EINVAL;
+	if (attrs->plane >= KVM_MAX_PLANES)
+		return -EINVAL;
+	if (attrs->attributes & ~KVM_MEMORY_ATTRIBUTE_PROT)
+		return -EINVAL;
+	if (!kvm_mem_attributes_valid(kvm, attrs->attributes))
+		return -EINVAL;
+	if (attrs->size == 0 || attrs->address + attrs->size < attrs->address)
+		return -EINVAL;
+	if (!PAGE_ALIGNED(attrs->address) || !PAGE_ALIGNED(attrs->size))
+		return -EINVAL;
+
+	start = attrs->address >> PAGE_SHIFT;
+	end = (attrs->address + attrs->size) >> PAGE_SHIFT;
+
+	BUILD_BUG_ON(sizeof(attrs->attributes) != sizeof(unsigned long));
+
+	/* Planes are created and destroyed under kvm->lock. */
+	guard(mutex)(&kvm->lock);
+	plane = kvm->planes[attrs->plane];
+	if (!plane)
+		return -ENOENT;
+
+	return kvm_plane_set_access_attrs(plane, start, end, attrs->attributes);
 }
 
 static int kvm_vm_ioctl_set_mem_attributes(struct kvm *kvm,
@@ -5887,6 +5966,16 @@ static long kvm_vm_ioctl(struct file *filp,
 			goto out;
 
 		r = kvm_vm_ioctl_set_mem_attributes(kvm, &attrs);
+		break;
+	}
+	case KVM_SET_PLANE_MEMORY_ATTRIBUTES: {
+		struct kvm_plane_memory_attributes attrs;
+
+		r = -EFAULT;
+		if (copy_from_user(&attrs, argp, sizeof(attrs)))
+			goto out;
+
+		r = kvm_vm_ioctl_set_plane_mem_attributes(kvm, &attrs);
 		break;
 	}
 #endif /* CONFIG_KVM_GENERIC_MEMORY_ATTRIBUTES */

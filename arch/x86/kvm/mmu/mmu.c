@@ -3187,7 +3187,7 @@ static bool kvm_mmu_prefetch_sptes(struct kvm_vcpu *vcpu, gfn_t gfn, u64 *sptep,
 		return false;
 
 	for (i = 0; i < nr_pages; i++, gfn++, sptep++) {
-		if (kvm_get_memory_attributes(vcpu->kvm, gfn))
+		if (kvm_get_gfn_attributes(vcpu, gfn))
 			continue;
 
 		mmu_set_spte(vcpu, slot, sptep, access, gfn,
@@ -4649,7 +4649,7 @@ static inline unsigned kvm_get_gfn_protections(struct kvm_vcpu *vcpu, gfn_t gfn)
 {
 	struct kvm *kvm = vcpu->kvm;
 	unsigned int access = vcpu->arch.mmu->root_role.access;
-	unsigned long attrs = kvm_get_memory_attributes(kvm, gfn);
+	unsigned long attrs = kvm_get_gfn_attributes(vcpu, gfn);
 	if (!attrs)
 		return access;
 
@@ -4682,8 +4682,10 @@ static int kvm_faultin_memory_protections(struct kvm_vcpu *vcpu,
 		return RET_PF_CONTINUE;
 
 	trace_kvm_faultin_memory_protections(vcpu, fault, access);
-	if (__permission_fault(vcpu->arch.mmu, access, fault))
+	if (__permission_fault(vcpu->arch.mmu, access, fault)) {
+		fault->plane_denied = kvm_plane_access_attrs(vcpu->plane, fault->gfn);
 		return -EFAULT;
+	}
 
 	fault->host_access &= access;
 	return RET_PF_CONTINUE;
@@ -7172,6 +7174,17 @@ static bool kvm_rmap_zap_gfn_range(struct kvm *kvm, gfn_t gfn_start, gfn_t gfn_e
  * Invalidate (zap) SPTEs that cover GFNs from gfn_start and up to gfn_end
  * (not including it)
  */
+void kvm_arch_plane_access_attrs_changed(struct kvm_plane *plane,
+					 gfn_t start, gfn_t end)
+{
+	/*
+	 * Re-fault the range so existing mappings pick up the new
+	 * restriction.  Zapping every plane's roots is harmless; the other
+	 * planes rebuild identical entries on their next access.
+	 */
+	kvm_zap_gfn_range(plane->kvm, start, end);
+}
+
 void kvm_zap_gfn_range(struct kvm *kvm, gfn_t gfn_start, gfn_t gfn_end)
 {
 	bool flush;

@@ -6715,6 +6715,54 @@ in the future may use the plane id when planes are supported by hardware (as is
 the case for VMPLs in AMD), or if KVM supports accelerated plane switch
 operations (as might be the case for Hyper-V VTLs).
 
+4.146 KVM_SET_PLANE_MEMORY_ATTRIBUTES
+-------------------------------------
+
+:Capability: KVM_CAP_PLANES
+:Architectures: x86
+:Type: vm ioctl
+:Parameters: struct kvm_plane_memory_attributes (in)
+:Returns: 0 on success, <0 on error
+
+Errors:
+
+  ======   =============================================================
+  EINVAL   address or size is not page aligned, the range wraps, flags is
+           not zero, plane is out of range, or attributes holds anything
+           other than a valid NR/NW/NX combination
+  ENOENT   the plane does not exist
+  ENOMEM   the restriction could not be recorded
+  ======   =============================================================
+
+::
+
+  struct kvm_plane_memory_attributes {
+	__u32 plane;
+	__u32 flags;
+	__u64 address;
+	__u64 size;
+	__u64 attributes;
+  };
+
+Restricts how vCPUs of the given plane may access the guest physical range
+[address, address + size).  The accepted attributes are
+KVM_MEMORY_ATTRIBUTE_NR/NW/NX with the same rules as KVM_SET_MEMORY_ATTRIBUTES;
+KVM_MEMORY_ATTRIBUTE_PRIVATE is rejected.  The restriction applies to that
+plane's page tables and to the guest page-table walks of its vCPUs; every other
+plane keeps its own view.  It combines with the VM-wide attributes set through
+KVM_SET_MEMORY_ATTRIBUTES: a plane never gets more access than the VM allows.
+An attributes value of 0 removes the restriction for the range.
+
+When a vCPU of the plane performs an access the restriction forbids, KVM_RUN
+returns KVM_EXIT_MEMORY_FAULT with KVM_MEMORY_EXIT_FLAG_PLANE set, the access
+type in the READ/WRITE/EXEC flags, and the faulting plane in the plane field.
+This is how a Hyper-V VSM implementation turns a VTL0 violation of a VTL1
+protection (HvCallModifyVtlProtectionMask) into a memory intercept for VTL1.
+
+The restriction does not apply to accesses KVM performs on behalf of the plane
+through kvm_vcpu_read/write_guest(), for example from the instruction emulator;
+those honour only the VM-wide attributes.
+
 5. The kvm_run structure
 ========================
 
@@ -7413,6 +7461,7 @@ spec refer, https://github.com/riscv/riscv-sbi-doc.
 			__u64 flags;
 			__u64 gpa;
 			__u64 size;
+			__u8 plane;
 		} memory_fault;
 
 KVM_EXIT_MEMORY_FAULT indicates the vCPU has encountered a memory fault that
@@ -7425,6 +7474,11 @@ describes properties of the faulting access that are likely pertinent:
  - KVM_MEMORY_EXIT_FLAG_PRIVATE - When set, indicates the memory fault occurred
    on a private memory access.  When clear, indicates the fault occurred on a
    shared access.
+ - KVM_MEMORY_EXIT_FLAG_PLANE - When set, indicates the access was denied by a
+   restriction set with KVM_SET_PLANE_MEMORY_ATTRIBUTES.
+
+The 'plane' field holds the plane of the vCPU that faulted; it is 0 on a VM
+without planes.
 
 Note!  KVM_EXIT_MEMORY_FAULT is unique among all KVM exit reasons in that it
 accompanies a return code of '-1', not '0'!  errno will always be set to EFAULT
