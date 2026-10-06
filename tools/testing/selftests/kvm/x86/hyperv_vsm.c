@@ -3,6 +3,11 @@
  * Hyper-V Virtual Secure Mode: hypercall exits, XMM payload and plane-aware
  * SynIC and TLB flush handling.
  */
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
 #include "kvm_util.h"
 #include "processor.h"
 #include "apic.h"
@@ -361,6 +366,186 @@ static void test_plane_tlb_flush(void)
 	ksft_test_result_pass("TLB flush from plane 1 targets plane 1\n");
 }
 
+#define AUTO_EOI_VECTOR		0x40
+#define AUTO_EOI_SPINS		BIT_ULL(28)
+#define APICV_INHIBIT_REASON_HYPERV	1
+
+#define TRACEFS		"/sys/kernel/tracing"
+#define INHIBIT_EVENT	TRACEFS "/events/kvm/kvm_apicv_inhibit_changed/enable"
+
+static u32 auto_eoi_count;
+
+static bool write_tracefs(const char *path, const char *val)
+{
+	int fd = open(path, O_WRONLY);
+	bool ok;
+
+	if (fd < 0)
+		return false;
+	ok = write(fd, val, strlen(val)) == (ssize_t)strlen(val);
+	close(fd);
+	return ok;
+}
+
+/* Arm the inhibit tracepoint; false when tracefs is not usable here. */
+static bool inhibit_trace_start(void)
+{
+	return write_tracefs(TRACEFS "/trace", "") &&
+	       write_tracefs(INHIBIT_EVENT, "1") &&
+	       write_tracefs(TRACEFS "/tracing_on", "1");
+}
+
+/* True when the trace holds a "set" event for the given reason. */
+static bool inhibit_trace_has_set(int reason)
+{
+	char line[256], needle[32];
+	bool found = false;
+	FILE *f;
+
+	write_tracefs(INHIBIT_EVENT, "0");
+	f = fopen(TRACEFS "/trace", "r");
+	if (!f)
+		return false;
+	snprintf(needle, sizeof(needle), "set reason=%d,", reason);
+	while (fgets(line, sizeof(line), f))
+		if (strstr(line, "kvm_apicv_inhibit_changed:") && strstr(line, needle))
+			found = true;
+	fclose(f);
+	return found;
+}
+
+/* Never writes EOI, as a guest relying on auto-EOI does. */
+static void guest_auto_eoi_handler(struct ex_regs *regs)
+{
+	WRITE_ONCE(auto_eoi_count, auto_eoi_count + 1);
+}
+
+static void guest_wait_auto_eoi(u32 count)
+{
+	u64 spins = 0;
+
+	while (READ_ONCE(auto_eoi_count) < count) {
+		GUEST_ASSERT(spins++ < AUTO_EOI_SPINS);
+		sti_nop_cli();
+	}
+}
+
+static u64 guest_apic_vector_bit(u32 reg, u8 vector)
+{
+	return x2apic_read_reg(reg + (vector / 32) * 0x10) & BIT(vector % 32);
+}
+
+/* Runs on plane 1 and takes the marked vector twice without any EOI. */
+static void guest_plane1_auto_eoi(void)
+{
+	x2apic_enable();
+	GUEST_SYNC(1);
+
+	guest_wait_auto_eoi(1);
+	GUEST_ASSERT(!guest_apic_vector_bit(APIC_ISR, AUTO_EOI_VECTOR));
+	GUEST_ASSERT(!guest_apic_vector_bit(APIC_IRR, AUTO_EOI_VECTOR));
+	GUEST_ASSERT_EQ(x2apic_read_reg(APIC_PROCPRI), 0);
+	GUEST_SYNC(2);
+
+	guest_wait_auto_eoi(2);
+	GUEST_ASSERT(!guest_apic_vector_bit(APIC_ISR, AUTO_EOI_VECTOR));
+	GUEST_ASSERT(!guest_apic_vector_bit(APIC_IRR, AUTO_EOI_VECTOR));
+	GUEST_SYNC(3);
+	GUEST_DONE();
+}
+
+/*
+ * A vector marked auto-EOI on the plane 1 vCPU and signalled on the plane 1
+ * fd is taken by plane 1, twice without an EOI in between, and never shows
+ * in the ISR or IRR.
+ */
+static void test_plane_auto_eoi(void)
+{
+	struct kvm_hyperv_auto_eoi mark = {
+		.vector = AUTO_EOI_VECTOR,
+		.set = KVM_HYPERV_AUTO_EOI_SET,
+	};
+	struct kvm_msi msi = {
+		.address_lo = APIC_DEFAULT_GPA,
+		.data = AUTO_EOI_VECTOR,
+	};
+	struct kvm_plane_vcpu *plane_vcpu;
+	struct kvm_plane *plane;
+	struct kvm_sregs sregs;
+	struct kvm_regs regs;
+	struct kvm_vcpu *vcpu;
+	struct kvm_vm *vm;
+	struct ucall uc;
+	bool traced;
+	int r;
+
+	TEST_REQUIRE(kvm_has_cap(KVM_CAP_PLANES_USERSPACE_SWITCH));
+
+	kvm_force_split_irqchip = true;
+	vm = __vm_create(VM_SHAPE_DEFAULT, 1, 0);
+	kvm_force_split_irqchip = false;
+	vm_enable_cap(vm, KVM_CAP_PLANES_USERSPACE_SWITCH, 0);
+	vm_enable_cap(vm, KVM_CAP_HYPERV_VSM, 0);
+
+	vcpu = vm_vcpu_add(vm, 0, guest_plane0);
+	vcpu_set_hv_cpuid(vcpu);
+	vm_install_exception_handler(vm, AUTO_EOI_VECTOR, guest_auto_eoi_handler);
+	plane = vm_plane_add(vm, 1);
+	plane_vcpu = __vm_plane_vcpu_add(vcpu, plane);
+
+	_plane_vcpu_set_msr(plane_vcpu, MSR_IA32_APICBASE,
+			    APIC_DEFAULT_GPA | MSR_IA32_APICBASE_ENABLE | X2APIC_ENABLE);
+
+	vcpu_sregs_get(vcpu, &sregs);
+	plane_vcpu_ioctl(plane_vcpu, KVM_SET_SREGS, &sregs);
+	vcpu_regs_get(vcpu, &regs);
+	regs.rip = (unsigned long)guest_plane1_auto_eoi;
+	regs.rsp = vm_alloc_stack(vm, DEFAULT_STACK_PGS);
+	plane_vcpu_ioctl(plane_vcpu, KVM_SET_REGS, &regs);
+
+	/* The mark inhibits APICv on this vCPU only, never VM-wide. */
+	traced = inhibit_trace_start();
+	plane_vcpu_ioctl(plane_vcpu, KVM_HYPERV_SET_AUTO_EOI, &mark);
+
+	vcpu->run->plane = 1;
+	vcpu_run(vcpu);
+	expect_sync(vcpu, 1);
+	TEST_ASSERT_EQ(vcpu->run->plane, 1);
+
+	r = __plane_ioctl(plane, KVM_SIGNAL_MSI, &msi);
+	TEST_ASSERT(r == 1, "MSI to plane 1. ret: %d, errno: %d", r, errno);
+	vcpu_run(vcpu);
+	expect_sync(vcpu, 2);
+	TEST_ASSERT_EQ(vcpu->run->plane, 1);
+
+	r = __plane_ioctl(plane, KVM_SIGNAL_MSI, &msi);
+	TEST_ASSERT(r == 1, "Second MSI to plane 1. ret: %d, errno: %d", r, errno);
+	vcpu_run(vcpu);
+	expect_sync(vcpu, 3);
+	TEST_ASSERT_EQ(vcpu->run->plane, 1);
+
+	vcpu_run(vcpu);
+	switch (get_ucall(vcpu, &uc)) {
+	case UCALL_ABORT:
+		REPORT_GUEST_ASSERT(uc);
+	case UCALL_DONE:
+		break;
+	default:
+		TEST_FAIL("Unexpected exit %u", vcpu->run->exit_reason);
+	}
+
+	if (traced)
+		TEST_ASSERT(!inhibit_trace_has_set(APICV_INHIBIT_REASON_HYPERV),
+			    "Auto-EOI mark inhibited APICv VM-wide (reason HYPERV)");
+
+	kvm_vm_free(vm);
+	ksft_test_result_pass("Auto-EOI vector delivered to plane 1 without ISR\n");
+	if (traced)
+		ksft_test_result_pass("Auto-EOI mark does not inhibit APICv VM-wide\n");
+	else
+		ksft_test_result_skip("Auto-EOI mark does not inhibit APICv VM-wide: no tracefs\n");
+}
+
 int main(int argc, char *argv[])
 {
 	struct kvm_vm *vm;
@@ -369,7 +554,7 @@ int main(int argc, char *argv[])
 	TEST_REQUIRE(kvm_has_cap(KVM_CAP_HYPERV_VSM));
 
 	ksft_print_header();
-	ksft_set_plan(4);
+	ksft_set_plan(6);
 
 	test_cap_off();
 	test_cap_on();
@@ -380,9 +565,12 @@ int main(int argc, char *argv[])
 	if (cap_planes > 1) {
 		test_plane_synic();
 		test_plane_tlb_flush();
+		test_plane_auto_eoi();
 	} else {
 		ksft_test_result_skip("SINT route on plane 1 lands in plane 1\n");
 		ksft_test_result_skip("TLB flush from plane 1 targets plane 1\n");
+		ksft_test_result_skip("Auto-EOI vector delivered to plane 1 without ISR\n");
+		ksft_test_result_skip("Auto-EOI mark does not inhibit APICv VM-wide\n");
 	}
 
 	ksft_finished();
