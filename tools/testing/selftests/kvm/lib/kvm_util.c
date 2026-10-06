@@ -817,8 +817,20 @@ void kvm_vm_release(struct kvm_vm *vmp)
 	struct kvm_plane_vcpu *plane_vcpu, *tmp_plane_vcpu;
 	struct kvm_plane *plane, *tmp_plane;
 
-	list_for_each_entry_safe(vcpu, tmp, &vmp->vcpus, list)
+	list_for_each_entry_safe(plane_vcpu, tmp_plane_vcpu, &vmp->plane_vcpus, list) {
+		kvm_free_fd(plane_vcpu->fd);
+		list_del(&plane_vcpu->list);
+		free(plane_vcpu);
+	}
+
+	list_for_each_entry_safe(vcpu, tmp_vcpu, &vmp->vcpus, list)
 		vm_vcpu_rm(vmp, vcpu);
+
+	list_for_each_entry_safe(plane, tmp_plane, &vmp->planes, list) {
+		kvm_free_fd(plane->fd);
+		list_del(&plane->list);
+		free(plane);
+	}
 
 	kvm_free_fd(vmp->fd);
 	kvm_free_fd(vmp->kvm_fd);
@@ -1394,11 +1406,29 @@ struct kvm_plane_vcpu *__vm_plane_vcpu_add(struct kvm_vcpu *vcpu, struct kvm_pla
 	TEST_ASSERT_VM_VCPU_IOCTL(plane_vcpu->fd >= 0, KVM_CREATE_VCPU, plane_vcpu->fd, plane->vm);
 	plane_vcpu->id = vcpu->id;
 	plane_vcpu->plane0 = vcpu;
+	plane_vcpu->plane = plane;
 
 	/* Add to linked-list of extra-plane VCPUs. */
 	list_add(&plane_vcpu->list, &plane->vm->plane_vcpus);
 
 	return plane_vcpu;
+}
+
+int vcpu_ran_fd(struct kvm_vcpu *vcpu)
+{
+	struct kvm_plane_vcpu *plane_vcpu;
+
+	if (!vcpu->run->plane)
+		return vcpu->fd;
+
+	list_for_each_entry(plane_vcpu, &vcpu->vm->plane_vcpus, list) {
+		if (plane_vcpu->plane0 == vcpu &&
+		    plane_vcpu->plane->id == vcpu->run->plane)
+			return plane_vcpu->fd;
+	}
+
+	TEST_FAIL("vCPU %u has no plane %u vCPU", vcpu->id, vcpu->run->plane);
+	return -1;
 }
 
 /*

@@ -56,13 +56,11 @@ void test_create_plane(void)
 
 	plane = vm_plane_add(vm, 1);
 
+	/* A plane fd takes plane ioctls only; capabilities are a VM matter. */
 	r = __plane_ioctl(plane, KVM_CHECK_EXTENSION, (void *)(unsigned long)KVM_CAP_PLANES);
-	TEST_ASSERT(r == 0,
-		    "Checking KVM_CHECK_EXTENSION(KVM_CAP_PLANES). ret: %d", r);
-
-	r = __plane_ioctl(plane, KVM_CHECK_EXTENSION, (void *)(unsigned long)KVM_CAP_CHECK_EXTENSION_VM);
-	TEST_ASSERT(r == 1,
-		    "Checking KVM_CHECK_EXTENSION(KVM_CAP_CHECK_EXTENSION_VM). ret: %d", r);
+	TEST_ASSERT(r == -1 && errno == ENOTTY,
+		    "KVM_CHECK_EXTENSION on a plane fd, expecting ENOTTY. ret: %d, errno: %d",
+		    r, errno);
 
 	r = __vm_ioctl(vm, KVM_CREATE_PLANE, (void *)(unsigned long)1);
 	TEST_ASSERT(r == -1 && errno == EEXIST,

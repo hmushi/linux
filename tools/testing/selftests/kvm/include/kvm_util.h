@@ -86,7 +86,14 @@ struct kvm_plane_vcpu {
 	uint32_t id;
 	int fd;
 	struct kvm_vcpu *plane0;
+	struct kvm_plane *plane;
 };
+
+/*
+ * fd of the plane vCPU that ran on the last KVM_RUN: the plane named by
+ * kvm_run->plane under KVM_CAP_PLANES_USERSPACE_SWITCH, else the vCPU itself.
+ */
+int vcpu_ran_fd(struct kvm_vcpu *vcpu);
 
 struct userspace_mem_regions {
 	struct rb_root gpa_tree;

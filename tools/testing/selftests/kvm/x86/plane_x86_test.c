@@ -282,6 +282,8 @@ static void test_plane_userspace_switch(void)
 	plane_vcpu_ioctl(plane_vcpu, KVM_SET_SREGS, &sregs);
 	vcpu_regs_get(vcpu, &regs);
 	regs.rip = (unsigned long)guest_plane1;
+	/* Same address space; a stack of its own keeps the planes' frames apart. */
+	regs.rsp = vm_alloc_stack(vm, DEFAULT_STACK_PGS);
 	plane_vcpu_ioctl(plane_vcpu, KVM_SET_REGS, &regs);
 	_plane_vcpu_set_msr(plane_vcpu, MSR_IA32_APICBASE,
 			    APIC_DEFAULT_GPA | MSR_IA32_APICBASE_ENABLE | X2APIC_ENABLE);

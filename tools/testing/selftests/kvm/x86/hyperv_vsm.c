@@ -344,6 +344,7 @@ static void test_plane_tlb_flush(void)
 	plane_vcpu_ioctl(plane_vcpu, KVM_SET_SREGS, &sregs);
 	vcpu_regs_get(vcpu, &regs);
 	regs.rip = (unsigned long)guest_plane1_flush;
+	regs.rsp = vm_alloc_stack(vm, DEFAULT_STACK_PGS);
 	regs.rdi = addr_gva2gpa(vm, hcall_page);
 	regs.rsi = flush_page;
 	regs.rdx = addr_gva2gpa(vm, flush_page);
