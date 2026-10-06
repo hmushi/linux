@@ -7443,10 +7443,16 @@ EOI was received.
 
 ::
 
+		struct kvm_hyperv_xmm_reg {
+			__u64 low;
+			__u64 high;
+		};
+
 		struct kvm_hyperv_exit {
   #define KVM_EXIT_HYPERV_SYNIC          1
   #define KVM_EXIT_HYPERV_HCALL          2
   #define KVM_EXIT_HYPERV_SYNDBG         3
+  #define KVM_EXIT_HYPERV_HCALL_XMM      4
 			__u32 type;
 			__u32 pad1;
 			union {
@@ -7461,6 +7467,7 @@ EOI was received.
 					__u64 input;
 					__u64 result;
 					__u64 params[2];
+					struct kvm_hyperv_xmm_reg xmm[6];
 				} hcall;
 				struct {
 					__u32 msr;
@@ -7492,6 +7499,32 @@ in userspace.
 Hyper-V Synthetic debugger state change. Notification is used to either update
 the pending_page location or to send a control command (send the buffer located
 in send_page or recv a buffer to recv_page).
+
+	- KVM_EXIT_HYPERV_HCALL -- a Hyper-V hypercall that KVM does not handle
+
+itself.  'input' is the hypercall input value (RCX), 'params' hold the input and
+output parameters (RDX and R8, i.e. the GPAs of the input and output blocks of a
+memory-based hypercall).  Userspace stores the hypercall result in 'result'
+before resuming the vCPU; KVM writes it to the guest and skips the instruction.
+With KVM_CAP_HYPERV_VSM enabled the Virtual Secure Mode hypercalls
+HvCallModifyVtlProtectionMask, HvCallEnablePartitionVtl, HvCallEnableVpVtl,
+HvCallVtlCall, HvCallVtlReturn, HvCallGetVpRegisters, HvCallSetVpRegisters,
+HvCallTranslateVirtualAddress, HvCallStartVirtualProcessor and
+HvCallGetVpIndexFromApicId exit this way.  HvCallVtlCall and HvCallVtlReturn
+have no result: KVM only skips the instruction when the vCPU resumes, and does
+not read kvm_run, so userspace may run another plane in between.  For every
+other hypercall userspace must complete the exit before switching planes.
+
+	- KVM_EXIT_HYPERV_HCALL_XMM -- as KVM_EXIT_HYPERV_HCALL, for a fast
+
+hypercall whose input or output block is carried in XMM registers (the guest
+set the fast bit and the hypercall is one that uses XMM registers per the
+Hyper-V TLFS).  'xmm' holds XMM0 to XMM5 at the time of the hypercall.  When
+the hypercall returns its output block in XMM registers (HvCallGetVpRegisters,
+HvCallTranslateVirtualAddress, HvCallGetVpIndexFromApicId) and 'result' is a
+success, KVM loads XMM0 to XMM5 from 'xmm' before resuming the guest.  This
+type is only used for hypercalls enabled by KVM_CAP_HYPERV_VSM; other fast
+hypercalls keep using KVM_EXIT_HYPERV_HCALL.
 
 ::
 
@@ -9388,6 +9421,28 @@ through hugetlbfs can be enabled for a VM. After the capability is
 enabled, cmma can't be enabled anymore and pfmfi and the storage key
 interpretation are disabled. If cmma has already been enabled or the
 hpage_2g module parameter is not set to 1, -EINVAL is returned.
+
+7.48 KVM_CAP_HYPERV_VSM
+-----------------------
+
+:Architectures: x86
+:Target: VM
+:Parameters: args[0] must be 0
+:Returns: 0 on success, -EINVAL if args[0] is not 0
+
+Enables the Hyper-V Virtual Secure Mode hypercalls.  With the capability
+enabled, HvCallModifyVtlProtectionMask, HvCallEnablePartitionVtl,
+HvCallEnableVpVtl, HvCallVtlCall, HvCallVtlReturn, HvCallGetVpRegisters,
+HvCallSetVpRegisters, HvCallTranslateVirtualAddress,
+HvCallStartVirtualProcessor and HvCallGetVpIndexFromApicId exit to userspace
+with KVM_EXIT_HYPERV, type KVM_EXIT_HYPERV_HCALL or KVM_EXIT_HYPERV_HCALL_XMM
+(see the description of KVM_EXIT_HYPERV).  Without it these hypercalls return
+HV_STATUS_INVALID_HYPERCALL_CODE to the guest.  Userspace advertises the
+hypercalls through the AccessVsm, AccessVpRegisters and StartVirtualProcessor
+partition privileges in CPUID leaf 0x40000003 EBX (KVM_GET_SUPPORTED_HV_CPUID
+reports them); with KVM_CAP_HYPERV_ENFORCE_CPUID the hypercalls are refused
+unless the matching bit is set, and the XMM output path requires bit 15 of
+leaf 0x40000003 EDX.
 
 8. Other capabilities.
 ======================

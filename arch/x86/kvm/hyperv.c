@@ -2454,9 +2454,60 @@ static int kvm_hv_hypercall_complete(struct kvm_vcpu *vcpu, u64 result)
 	return ret;
 }
 
+/* Fast hypercalls whose output block comes back in XMM registers. */
+static bool is_xmm_output_hypercall(u16 code)
+{
+	switch (code) {
+	case HVCALL_GET_VP_REGISTERS:
+	case HVCALL_TRANSLATE_VIRTUAL_ADDRESS:
+	case HVCALL_GET_VP_INDEX_FROM_APIC_ID:
+		return true;
+	}
+
+	return false;
+}
+
+static void kvm_hv_write_xmm(struct kvm_hyperv_xmm_reg *xmm)
+{
+	int reg;
+
+	kvm_fpu_get();
+	for (reg = 0; reg < HV_HYPERCALL_MAX_XMM_REGISTERS; reg++) {
+		const sse128_t data = sse128(xmm[reg].low, xmm[reg].high);
+
+		_kvm_write_sse_reg(reg, &data);
+	}
+	kvm_fpu_put();
+}
+
 static int kvm_hv_hypercall_complete_userspace(struct kvm_vcpu *vcpu)
 {
-	return kvm_hv_hypercall_complete(vcpu, vcpu->run->hyperv.u.hcall.result);
+	struct kvm_hyperv_exit *exit = &vcpu->run->hyperv;
+	u16 code = exit->u.hcall.input & 0xffff;
+	u64 result = exit->u.hcall.result;
+
+	if (exit->type == KVM_EXIT_HYPERV_HCALL_XMM &&
+	    hv_result_success(result) && is_xmm_output_hypercall(code))
+		kvm_hv_write_xmm(exit->u.hcall.xmm);
+
+	return kvm_hv_hypercall_complete(vcpu, result);
+}
+
+/*
+ * HvCallVtlCall and HvCallVtlReturn have no result: the hypercall page
+ * prologue moved RCX into RAX before the VMCALL and the hypervisor must
+ * leave it there.  Userspace runs the other plane before this one resumes,
+ * so kvm_run no longer describes this hypercall and is not consulted.
+ */
+static int kvm_hv_hypercall_complete_vtl_switch(struct kvm_vcpu *vcpu)
+{
+	if (kvm_hv_vcpu_suspended(vcpu))
+		return 1;
+
+	trace_kvm_hv_hypercall_done(HV_STATUS_SUCCESS);
+	++vcpu->stat.hypercalls;
+
+	return kvm_skip_emulated_instruction(vcpu);
 }
 
 static u16 kvm_hvcall_signal_event(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
@@ -2508,6 +2559,11 @@ static bool is_xmm_fast_hypercall(struct kvm_hv_hcall *hc)
 	case HVCALL_FLUSH_VIRTUAL_ADDRESS_LIST_EX:
 	case HVCALL_FLUSH_VIRTUAL_ADDRESS_SPACE_EX:
 	case HVCALL_SEND_IPI_EX:
+	case HVCALL_MODIFY_VTL_PROTECTION_MASK:
+	case HVCALL_GET_VP_REGISTERS:
+	case HVCALL_SET_VP_REGISTERS:
+	case HVCALL_TRANSLATE_VIRTUAL_ADDRESS:
+	case HVCALL_GET_VP_INDEX_FROM_APIC_ID:
 		return true;
 	}
 
@@ -2526,6 +2582,8 @@ static void kvm_hv_hypercall_read_xmm(struct kvm_hv_hcall *hc)
 
 static bool hv_check_hypercall_access(struct kvm_vcpu_hv *hv_vcpu, u16 code)
 {
+	bool vsm = to_kvm_hv(hv_vcpu->vcpu->kvm)->vsm_enabled;
+
 	if (!hv_vcpu->enforce_cpuid)
 		return true;
 
@@ -2567,6 +2625,21 @@ static bool hv_check_hypercall_access(struct kvm_vcpu_hv *hv_vcpu, u16 code)
 	case HV_EXT_CALL_QUERY_CAPABILITIES ... HV_EXT_CALL_MAX:
 		return hv_vcpu->cpuid_cache.features_ebx &
 			HV_ENABLE_EXTENDED_HYPERCALLS;
+	case HVCALL_MODIFY_VTL_PROTECTION_MASK:
+	case HVCALL_ENABLE_PARTITION_VTL:
+	case HVCALL_ENABLE_VP_VTL:
+	case HVCALL_VTL_CALL:
+	case HVCALL_VTL_RETURN:
+		/* 'true' without VSM so the result is INVALID_HYPERCALL_CODE */
+		return !vsm || hv_vcpu->cpuid_cache.features_ebx & HV_ACCESS_VSM;
+	case HVCALL_GET_VP_REGISTERS:
+	case HVCALL_SET_VP_REGISTERS:
+		return !vsm ||
+			hv_vcpu->cpuid_cache.features_ebx & HV_ACCESS_VP_REGISTERS;
+	case HVCALL_START_VP:
+	case HVCALL_GET_VP_INDEX_FROM_APIC_ID:
+		return !vsm ||
+			hv_vcpu->cpuid_cache.features_ebx & HV_START_VIRTUAL_PROCESSOR;
 	default:
 		break;
 	}
@@ -2755,6 +2828,29 @@ int kvm_hv_hypercall(struct kvm_vcpu *vcpu)
 			break;
 		}
 		goto hypercall_userspace_exit;
+	case HVCALL_MODIFY_VTL_PROTECTION_MASK:
+	case HVCALL_ENABLE_PARTITION_VTL:
+	case HVCALL_ENABLE_VP_VTL:
+	case HVCALL_VTL_CALL:
+	case HVCALL_VTL_RETURN:
+	case HVCALL_GET_VP_REGISTERS:
+	case HVCALL_SET_VP_REGISTERS:
+	case HVCALL_TRANSLATE_VIRTUAL_ADDRESS:
+	case HVCALL_START_VP:
+	case HVCALL_GET_VP_INDEX_FROM_APIC_ID:
+		if (!to_kvm_hv(kvm)->vsm_enabled) {
+			ret = HV_STATUS_INVALID_HYPERCALL_CODE;
+			break;
+		}
+
+		if (hc.fast && is_xmm_output_hypercall(hc.code) &&
+		    unlikely(hv_vcpu->enforce_cpuid &&
+			     !(hv_vcpu->cpuid_cache.features_edx &
+			       HV_X64_HYPERCALL_XMM_OUTPUT_AVAILABLE))) {
+			kvm_queue_exception(vcpu, UD_VECTOR);
+			return 1;
+		}
+		goto hypercall_userspace_exit;
 	default:
 		ret = HV_STATUS_INVALID_HYPERCALL_CODE;
 		break;
@@ -2769,7 +2865,24 @@ hypercall_userspace_exit:
 	vcpu->run->hyperv.u.hcall.input = hc.param;
 	vcpu->run->hyperv.u.hcall.params[0] = hc.ingpa;
 	vcpu->run->hyperv.u.hcall.params[1] = hc.outgpa;
-	vcpu->arch.complete_userspace_io = kvm_hv_hypercall_complete_userspace;
+	if (hc.fast && is_xmm_fast_hypercall(&hc)) {
+		struct kvm_hyperv_xmm_reg *xmm = vcpu->run->hyperv.u.hcall.xmm;
+		int reg;
+
+		BUILD_BUG_ON(ARRAY_SIZE(vcpu->run->hyperv.u.hcall.xmm) !=
+			     HV_HYPERCALL_MAX_XMM_REGISTERS);
+		vcpu->run->hyperv.type = KVM_EXIT_HYPERV_HCALL_XMM;
+		for (reg = 0; reg < HV_HYPERCALL_MAX_XMM_REGISTERS; reg++) {
+			xmm[reg].low = sse128_lo(hc.xmm[reg]);
+			xmm[reg].high = sse128_hi(hc.xmm[reg]);
+		}
+	}
+	if (hc.code == HVCALL_VTL_CALL || hc.code == HVCALL_VTL_RETURN)
+		vcpu->arch.complete_userspace_io =
+			kvm_hv_hypercall_complete_vtl_switch;
+	else
+		vcpu->arch.complete_userspace_io =
+			kvm_hv_hypercall_complete_userspace;
 	return 0;
 }
 
@@ -2915,8 +3028,12 @@ int kvm_get_hv_cpuid(struct kvm_vcpu *vcpu, struct kvm_cpuid2 *cpuid,
 			ent->ebx |= HV_POST_MESSAGES;
 			ent->ebx |= HV_SIGNAL_EVENTS;
 			ent->ebx |= HV_ENABLE_EXTENDED_HYPERCALLS;
+			ent->ebx |= HV_ACCESS_VSM;
+			ent->ebx |= HV_ACCESS_VP_REGISTERS;
+			ent->ebx |= HV_START_VIRTUAL_PROCESSOR;
 
 			ent->edx |= HV_X64_HYPERCALL_XMM_INPUT_AVAILABLE;
+			ent->edx |= HV_X64_HYPERCALL_XMM_OUTPUT_AVAILABLE;
 			ent->edx |= HV_FEATURE_FREQUENCY_MSRS_AVAILABLE;
 			ent->edx |= HV_FEATURE_GUEST_CRASH_MSR_AVAILABLE;
 

@@ -95,10 +95,16 @@ struct kvm_pit_config {
 
 #define KVM_PIT_SPEAKER_DUMMY     1
 
+struct kvm_hyperv_xmm_reg {
+	__u64 low;
+	__u64 high;
+};
+
 struct kvm_hyperv_exit {
 #define KVM_EXIT_HYPERV_SYNIC          1
 #define KVM_EXIT_HYPERV_HCALL          2
 #define KVM_EXIT_HYPERV_SYNDBG         3
+#define KVM_EXIT_HYPERV_HCALL_XMM      4
 	__u32 type;
 	__u32 pad1;
 	union {
@@ -113,6 +119,8 @@ struct kvm_hyperv_exit {
 			__u64 input;
 			__u64 result;
 			__u64 params[2];
+			/* KVM_EXIT_HYPERV_HCALL_XMM: XMM0..XMM5 of a fast call */
+			struct kvm_hyperv_xmm_reg xmm[6];
 		} hcall;
 		struct {
 			__u32 msr;
@@ -1065,6 +1073,7 @@ struct kvm_enable_cap {
 #define KVM_CAP_TRANSLATE2 254
 #define KVM_CAP_HYPERV_TLB_FLUSH_INHIBIT 255
 #define KVM_CAP_PLANES_USERSPACE_SWITCH 256
+#define KVM_CAP_HYPERV_VSM 257
 
 struct kvm_irq_routing_irqchip {
 	__u32 irqchip;

@@ -1128,6 +1128,8 @@ struct kvm_hv {
 
 	bool xsaves_xsavec_checked;
 	bool hcall_fault_exit;
+	/* KVM_CAP_HYPERV_VSM: the VSM hypercalls exit to userspace */
+	bool vsm_enabled;
 };
 #endif
 

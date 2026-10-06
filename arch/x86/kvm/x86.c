@@ -2280,6 +2280,7 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_SYS_HYPERV_CPUID:
 	case KVM_CAP_HYPERV_HCALL_FAULT_EXIT:
 	case KVM_CAP_HYPERV_TLB_FLUSH_INHIBIT:
+	case KVM_CAP_HYPERV_VSM:
 #endif
 	case KVM_CAP_PCI_SEGMENT:
 	case KVM_CAP_DEBUGREGS:
@@ -4319,6 +4320,13 @@ disable_exits_unlock:
 #ifdef CONFIG_KVM_HYPERV
 	case KVM_CAP_HYPERV_HCALL_FAULT_EXIT:
 		kvm->arch.hyperv.hcall_fault_exit = cap->args[0];
+		r = 0;
+		break;
+	case KVM_CAP_HYPERV_VSM:
+		r = -EINVAL;
+		if (cap->args[0])
+			break;
+		kvm->arch.hyperv.vsm_enabled = true;
 		r = 0;
 		break;
 #endif
