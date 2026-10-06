@@ -1490,9 +1490,14 @@ documentation when it pops into existence).
 
 :Capability: KVM_CAP_ENABLE_CAP
 :Architectures: mips, ppc, s390, x86, loongarch
-:Type: vcpu ioctl
+:Type: vcpu ioctl (x86: all planes for the Hyper-V vCPU capabilities)
 :Parameters: struct kvm_enable_cap (in)
 :Returns: 0 on success; -1 on error
+
+On x86 a vCPU of a plane other than 0 accepts KVM_CAP_HYPERV_SYNIC,
+KVM_CAP_HYPERV_SYNIC2, KVM_CAP_HYPERV_ENFORCE_CPUID and
+KVM_CAP_HYPERV_DIRECT_TLBFLUSH, which configure that vCPU's own Hyper-V
+state; other capabilities return -EINVAL on a plane vCPU.
 
 :Capability: KVM_CAP_ENABLE_CAP_VM
 :Architectures: all

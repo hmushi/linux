@@ -3397,10 +3397,32 @@ static int kvm_vcpu_ioctl_device_attr(struct kvm_vcpu *vcpu,
 	return r;
 }
 
+/*
+ * Per-vCPU capabilities that configure the Hyper-V state of one plane vCPU.
+ * The other capabilities belong to the plane 0 vCPU (shared state, nested).
+ */
+static bool kvm_plane_vcpu_cap(unsigned int cap)
+{
+	switch (cap) {
+#ifdef CONFIG_KVM_HYPERV
+	case KVM_CAP_HYPERV_SYNIC:
+	case KVM_CAP_HYPERV_SYNIC2:
+	case KVM_CAP_HYPERV_ENFORCE_CPUID:
+	case KVM_CAP_HYPERV_DIRECT_TLBFLUSH:
+		return true;
+#endif
+	default:
+		return false;
+	}
+}
+
 static int kvm_vcpu_ioctl_enable_cap(struct kvm_vcpu *vcpu,
 				     struct kvm_enable_cap *cap)
 {
 	if (cap->flags)
+		return -EINVAL;
+
+	if (vcpu->plane_level && !kvm_plane_vcpu_cap(cap->cap))
 		return -EINVAL;
 
 	switch (cap->cap) {
@@ -3454,6 +3476,7 @@ static int kvm_vcpu_ioctl_enable_cap(struct kvm_vcpu *vcpu,
 bool kvm_arch_is_vcpu_plane_ioctl(unsigned ioctl)
 {
 	switch (ioctl) {
+	case KVM_ENABLE_CAP:
 	case KVM_GET_DEBUGREGS:
 	case KVM_SET_DEBUGREGS:
 	case KVM_GET_LAPIC:
