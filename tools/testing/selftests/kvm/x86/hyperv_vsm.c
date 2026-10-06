@@ -388,6 +388,8 @@ static void test_plane_tlb_flush(void)
 
 #define AUTO_EOI_VECTOR		0x40
 #define AUTO_EOI_SPINS		BIT_ULL(28)
+#define EOI_MSR_VECTOR		0x60
+#define EOI_MSR_RESERVED	0xdeadbeef00000000ULL
 #define APICV_INHIBIT_REASON_HYPERV	1
 
 #define TRACEFS		"/sys/kernel/tracing"
@@ -566,6 +568,50 @@ static void test_plane_auto_eoi(void)
 		ksft_test_result_skip("Auto-EOI mark does not inhibit APICv VM-wide: no tracefs\n");
 }
 
+/*
+ * Hyper-V performs an EOI for any write to HV_X64_MSR_EOI and ignores bits
+ * 63:32 of the value.  Take an interrupt without acknowledging it, then write
+ * the MSR with those bits set: no fault, and the ISR bit is gone.
+ */
+static void guest_eoi_msr_reserved_bits(void)
+{
+	u8 vector;
+
+	x2apic_enable();
+	x2apic_write_reg(APIC_SELF_IPI, EOI_MSR_VECTOR);
+	guest_wait_auto_eoi(1);
+	GUEST_ASSERT(guest_apic_vector_bit(APIC_ISR, EOI_MSR_VECTOR));
+
+	vector = wrmsr_safe(HV_X64_MSR_EOI, EOI_MSR_RESERVED | EOI_MSR_VECTOR);
+	GUEST_ASSERT_EQ(vector, 0);
+	GUEST_ASSERT(!guest_apic_vector_bit(APIC_ISR, EOI_MSR_VECTOR));
+	GUEST_DONE();
+}
+
+static void test_eoi_msr_reserved_bits(void)
+{
+	struct kvm_vcpu *vcpu;
+	struct kvm_vm *vm;
+	struct ucall uc;
+
+	vm = vm_create_with_one_vcpu(&vcpu, guest_eoi_msr_reserved_bits);
+	vcpu_set_hv_cpuid(vcpu);
+	vm_install_exception_handler(vm, EOI_MSR_VECTOR, guest_auto_eoi_handler);
+
+	vcpu_run(vcpu);
+	switch (get_ucall(vcpu, &uc)) {
+	case UCALL_ABORT:
+		REPORT_GUEST_ASSERT(uc);
+	case UCALL_DONE:
+		break;
+	default:
+		TEST_FAIL("Unexpected exit %u", vcpu->run->exit_reason);
+	}
+
+	kvm_vm_free(vm);
+	ksft_test_result_pass("HV_X64_MSR_EOI ignores reserved bits\n");
+}
+
 int main(int argc, char *argv[])
 {
 	struct kvm_vm *vm;
@@ -574,10 +620,11 @@ int main(int argc, char *argv[])
 	TEST_REQUIRE(kvm_has_cap(KVM_CAP_HYPERV_VSM));
 
 	ksft_print_header();
-	ksft_set_plan(6);
+	ksft_set_plan(7);
 
 	test_cap_off();
 	test_cap_on();
+	test_eoi_msr_reserved_bits();
 
 	vm = vm_create_barebones_irqchip(true);
 	cap_planes = vm_check_cap(vm, KVM_CAP_PLANES);
