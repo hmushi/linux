@@ -5982,6 +5982,8 @@ kvm_calc_tdp_mmu_root_page_role(struct kvm_vcpu *vcpu,
 {
 	union kvm_mmu_page_role role = {0};
 
+	BUILD_BUG_ON(KVM_MAX_PLANES > (1 << 4));
+
 	role.cr0_wp = true;
 	role.cr4_smep = kvm_x86_call(tdp_has_smep)(vcpu->kvm);
 	role.efer_nx = true;
@@ -5991,6 +5993,7 @@ kvm_calc_tdp_mmu_root_page_role(struct kvm_vcpu *vcpu,
 	role.level = kvm_mmu_get_tdp_level(vcpu);
 	role.direct = true;
 	role.has_4_byte_gpte = false;
+	role.plane = vcpu->plane_level;
 
 	/* All TDP pages are supervisor-executable */
 	role.access = ACC_ALL;

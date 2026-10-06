@@ -366,12 +366,20 @@ union kvm_mmu_page_role {
 		unsigned:3;
 
 		/*
+		 * Plane that owns this page.  Planes share memslots but need
+		 * independent page tables so that one plane's access to a
+		 * gfn can be restricted without affecting the others.  Always
+		 * 0 on a VM without extra planes.
+		 */
+		unsigned plane:4;
+
+		/*
 		 * This is left at the top of the word so that
 		 * kvm_memslots_for_spte_role can extract it with a
-		 * simple shift.  While there is room, give it a whole
-		 * byte so it is also faster to load it from memory.
+		 * simple shift.  smm is only ever used as a boolean; it is
+		 * reduced from a byte to make room for the plane tag.
 		 */
-		unsigned smm:8;
+		unsigned smm:4;
 	};
 };
 
