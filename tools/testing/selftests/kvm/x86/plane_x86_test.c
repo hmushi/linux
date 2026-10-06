@@ -51,6 +51,43 @@ static void test_plane_regs(void)
 	ksft_test_result_pass("get/set regs for planes\n");
 }
 
+/*
+ * The planes of a VP share one TSC: a plane vCPU created later must take the
+ * TSC offset of its sibling, not start a new one.  Read the guest TSC on both
+ * fds back to back; the difference is the elapsed host time, not an offset.
+ */
+static void test_plane_tsc_offset(void)
+{
+	struct {
+		struct kvm_msrs header;
+		struct kvm_msr_entry entry;
+	} msrs0 = { .header.nmsrs = 1, .entry.index = MSR_IA32_TSC };
+	struct kvm_plane_vcpu *plane_vcpu;
+	struct kvm_plane *plane;
+	struct kvm_vcpu *vcpu;
+	struct kvm_vm *vm;
+	u64 tsc0, tsc1, bound;
+
+	vm = vm_create_barebones_irqchip(true);
+	vcpu = __vm_vcpu_add(vm, 0);
+	plane = vm_plane_add(vm, 1);
+	plane_vcpu = __vm_plane_vcpu_add(vcpu, plane);
+
+	TEST_ASSERT_EQ(__vcpu_ioctl(vcpu, KVM_GET_MSRS, &msrs0.header), 1);
+	tsc0 = msrs0.entry.data;
+	TEST_ASSERT_EQ(__plane_vcpu_ioctl(plane_vcpu, KVM_GET_MSRS, &msrs0.header), 1);
+	tsc1 = msrs0.entry.data;
+
+	/* One second of guest TSC; an unshared offset is off by far more. */
+	bound = (u64)__vcpu_ioctl(vcpu, KVM_GET_TSC_KHZ, NULL) * 1000;
+	TEST_ASSERT(tsc1 >= tsc0 && tsc1 - tsc0 < bound,
+		    "plane 1 TSC 0x%lx is not plane 0 TSC 0x%lx plus elapsed time",
+		    tsc1, tsc0);
+
+	kvm_vm_free(vm);
+	ksft_test_result_pass("plane vCPU shares the TSC offset\n");
+}
+
 /* Offset of XMM0 in the legacy XSAVE area.  */
 #define XSTATE_BV_OFFSET	(0x200/4)
 #define XMM_OFFSET		(0xa0/4)
@@ -530,6 +567,7 @@ int main(int argc, char *argv[])
 	pr_info("# KVM_CAP_PLANES: %d\n", cap_planes);
 
 	test_plane_regs();
+	test_plane_tsc_offset();
 	test_plane_fpu_nonshared();
 	test_plane_msi();
 	test_plane_mp_state();
