@@ -17,17 +17,28 @@
 #include "kvm_util.h"
 #include "processor.h"
 
+/*
+ * The PTE_*_MASK macros take the VM's MMU since the x86 selftest MMU rework.
+ * Every function below gets @vm, so resolve them against it.
+ */
+#define PTE_PRESENT_MASK_	PTE_PRESENT_MASK(&vm->mmu)
+#define PTE_WRITABLE_MASK_	PTE_WRITABLE_MASK(&vm->mmu)
+#define PTE_USER_MASK_		PTE_USER_MASK(&vm->mmu)
+#define PTE_ACCESSED_MASK_	PTE_ACCESSED_MASK(&vm->mmu)
+#define PTE_DIRTY_MASK_		PTE_DIRTY_MASK(&vm->mmu)
+#define PTE_NX_MASK_		PTE_NX_MASK(&vm->mmu)
+
 #define CHECK_ACCESSED_BIT(pte, set, start)                                     \
 	({                                                                      \
 		for (int _i = start; _i <= PG_LEVEL_512G; _i++) {               \
 			if (set)                                                \
 				TEST_ASSERT(                                    \
-					(*pte[_i] & PTE_ACCESSED_MASK) != 0,    \
+					(*pte[_i] & PTE_ACCESSED_MASK_) != 0,    \
 					"Page not marked accessed on level %i", \
 					_i);                                    \
 			else                                                    \
 				TEST_ASSERT(                                    \
-					(*pte[_i] & PTE_ACCESSED_MASK) == 0,    \
+					(*pte[_i] & PTE_ACCESSED_MASK_) == 0,    \
 					"Page marked accessed on level %i",     \
 					_i);                                    \
 		}                                                               \
@@ -36,10 +47,10 @@
 #define CHECK_DIRTY_BIT(pte, set)                                              \
 	({                                                                     \
 		if (set)                                                       \
-			TEST_ASSERT((*pte[PG_LEVEL_4K] & PTE_DIRTY_MASK) != 0, \
+			TEST_ASSERT((*pte[PG_LEVEL_4K] & PTE_DIRTY_MASK_) != 0, \
 				    "Page not marked dirty");                  \
 		else                                                           \
-			TEST_ASSERT((*pte[PG_LEVEL_4K] & PTE_DIRTY_MASK) == 0, \
+			TEST_ASSERT((*pte[PG_LEVEL_4K] & PTE_DIRTY_MASK_) == 0, \
 				    "Page marked dirty");                      \
 	})
 
@@ -76,7 +87,7 @@ struct kvm_translation2 kvm_translate2(struct kvm_vcpu *vcpu, uint64_t vaddr,
 }
 
 void test_translate(struct kvm_vm *vm, struct kvm_vcpu *vcpu, int index,
-		    uint64_t *pte[PG_LEVEL_NUM], vm_vaddr_t vaddr)
+		    uint64_t *pte[(PG_LEVEL_512G + 1)], gva_t vaddr)
 {
 	struct kvm_translation2 translation;
 	int access = index;
@@ -87,15 +98,15 @@ void test_translate(struct kvm_vm *vm, struct kvm_vcpu *vcpu, int index,
 	       (access & KVM_TRANSLATE_ACCESS_USER) >> 1,
 	       (access & KVM_TRANSLATE_ACCESS_EXEC) >> 2);
 
-	uint64_t mask = PTE_WRITABLE_MASK | PTE_USER_MASK | PTE_NX_MASK;
+	uint64_t mask = PTE_WRITABLE_MASK_ | PTE_USER_MASK_ | PTE_NX_MASK_;
 	uint64_t new_value = 0;
 
 	if (access & KVM_TRANSLATE_ACCESS_WRITE)
-		new_value |= PTE_WRITABLE_MASK;
+		new_value |= PTE_WRITABLE_MASK_;
 	if (access & KVM_TRANSLATE_ACCESS_USER)
-		new_value |= PTE_USER_MASK;
+		new_value |= PTE_USER_MASK_;
 	if (!(access & KVM_TRANSLATE_ACCESS_EXEC))
-		new_value |= PTE_NX_MASK;
+		new_value |= PTE_NX_MASK_;
 
 	for (int i = PG_LEVEL_4K; i <= PG_LEVEL_512G; i++)
 		*pte[i] = (*pte[i] & ~mask) | new_value;
@@ -120,13 +131,13 @@ void test_translate(struct kvm_vm *vm, struct kvm_vcpu *vcpu, int index,
 
 	/* Clear accessed bits */
 	for (int i = PG_LEVEL_4K; i <= PG_LEVEL_512G; i++)
-		*pte[i] &= ~PTE_ACCESSED_MASK;
+		*pte[i] &= ~PTE_ACCESSED_MASK_;
 
 	printf("[ok]\n");
 }
 
 void test_set_bits(struct kvm_vm *vm, struct kvm_vcpu *vcpu,
-		   uint64_t *pte[PG_LEVEL_NUM], vm_vaddr_t vaddr)
+		   uint64_t *pte[(PG_LEVEL_512G + 1)], gva_t vaddr)
 {
 	printf("%s ...\t", __func__);
 
@@ -156,7 +167,7 @@ void test_set_bits(struct kvm_vm *vm, struct kvm_vcpu *vcpu,
 }
 
 void test_errors(struct kvm_vm *vm, struct kvm_vcpu *vcpu,
-		 uint64_t *pte[PG_LEVEL_NUM], vm_vaddr_t vaddr)
+		 uint64_t *pte[(PG_LEVEL_512G + 1)], gva_t vaddr)
 {
 	struct kvm_translation2 tr;
 
@@ -191,10 +202,10 @@ void test_errors(struct kvm_vm *vm, struct kvm_vcpu *vcpu,
 
 	/* Clear accessed bits */
 	for (int i = PG_LEVEL_4K; i <= PG_LEVEL_512G; i++)
-		*pte[i] &= ~PTE_ACCESSED_MASK;
+		*pte[i] &= ~PTE_ACCESSED_MASK_;
 
 	/* Try translating a non-present page */
-	*pte[PG_LEVEL_4K] &= ~PTE_PRESENT_MASK;
+	*pte[PG_LEVEL_4K] &= ~PTE_PRESENT_MASK_;
 
 	tr = kvm_translate2(
 		vcpu, vaddr,
@@ -204,7 +215,7 @@ void test_errors(struct kvm_vm *vm, struct kvm_vcpu *vcpu,
 	TEST_ASSERT_EQ(tr.error_code, KVM_TRANSLATE_FAULT_NOT_PRESENT);
 	CHECK_ACCESSED_BIT(pte, true, PG_LEVEL_2M);
 
-	*pte[PG_LEVEL_4K] |= PTE_PRESENT_MASK;
+	*pte[PG_LEVEL_4K] |= PTE_PRESENT_MASK_;
 
 	/*
 	 * Try setting accessed/dirty bits on a PTE that is in read-only memory
@@ -217,7 +228,7 @@ void test_errors(struct kvm_vm *vm, struct kvm_vcpu *vcpu,
 
 	/* Copy the entire page table */
 	for (int i = 0; i < 0x200; i += 1)
-		addr[i] = (base[i] & ~PTE_ACCESSED_MASK) | PTE_PRESENT_MASK;
+		addr[i] = (base[i] & ~PTE_ACCESSED_MASK_) | PTE_PRESENT_MASK_;
 
 	uint64_t old_2m = *pte[PG_LEVEL_2M];
 	*pte[PG_LEVEL_2M] &= ~GENMASK(51, 12);
@@ -238,12 +249,12 @@ void test_errors(struct kvm_vm *vm, struct kvm_vcpu *vcpu,
 
 /* Test page walker stability, by trying to translate with garbage PTEs */
 void test_fuzz(struct kvm_vm *vm, struct kvm_vcpu *vcpu,
-	       uint64_t *pte[PG_LEVEL_NUM], vm_vaddr_t vaddr)
+	       uint64_t *pte[(PG_LEVEL_512G + 1)], gva_t vaddr)
 {
 	printf("%s ...\t", __func__);
 
 	/* Test gPTEs that point to random addresses */
-	for (int level = PG_LEVEL_4K; level < PG_LEVEL_NUM; level++) {
+	for (int level = PG_LEVEL_4K; level < (PG_LEVEL_512G + 1); level++) {
 		for (int i = 0; i < 10000; i++) {
 			uint64_t random_address = random() % GENMASK(29, 0) << 12;
 			*pte[level] = (*pte[level] & ~GENMASK(51, 12)) | random_address;
@@ -257,7 +268,7 @@ void test_fuzz(struct kvm_vm *vm, struct kvm_vcpu *vcpu,
 	}
 
 	/* Test gPTEs with completely random values */
-	for (int level = PG_LEVEL_4K; level < PG_LEVEL_NUM; level++) {
+	for (int level = PG_LEVEL_4K; level < (PG_LEVEL_512G + 1); level++) {
 		for (int i = 0; i < 10000; i++) {
 			*pte[level] = random();
 
@@ -274,22 +285,22 @@ void test_fuzz(struct kvm_vm *vm, struct kvm_vcpu *vcpu,
 
 int main(int argc, char *argv[])
 {
-	uint64_t *pte[PG_LEVEL_NUM];
+	uint64_t *pte[(PG_LEVEL_512G + 1)];
 	struct kvm_vcpu *vcpu;
 	struct kvm_sregs regs;
 	struct kvm_vm *vm;
-	vm_vaddr_t vaddr;
+	gva_t vaddr;
 	int page_level;
 
 	TEST_REQUIRE(kvm_has_cap(KVM_CAP_TRANSLATE2));
 
 	vm = vm_create_with_one_vcpu(&vcpu, NULL);
 
-	vaddr = __vm_vaddr_alloc_page(vm, MEM_REGION_TEST_DATA);
+	vaddr = __vm_alloc_page(vm, MEM_REGION_TEST_DATA);
 
 	for (page_level = PG_LEVEL_512G; page_level > PG_LEVEL_NONE;
 	     page_level--) {
-		pte[page_level] = __vm_get_page_table_entry(vm, vaddr, &page_level);
+		pte[page_level] = vm_get_pte_level(vm, vaddr, &page_level);
 	}
 
 	/* Enable WP bit in cr0, so kernel accesses uphold write protection */

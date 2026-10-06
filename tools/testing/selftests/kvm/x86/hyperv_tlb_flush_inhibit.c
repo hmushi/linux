@@ -15,10 +15,10 @@ struct timespec abstime;
 struct test_data {
 	bool entered;
 	bool hypercall_done;
-	vm_paddr_t hcall_gpa;
+	gpa_t hcall_gpa;
 };
 
-void guest_main(vm_vaddr_t test_data)
+void guest_main(gva_t test_data)
 {
 	struct test_data *data = (struct test_data *)test_data;
 
@@ -42,9 +42,9 @@ void guest_main(vm_vaddr_t test_data)
 
 struct test_data *test_data_init(struct kvm_vcpu *vcpu)
 {
-	vm_vaddr_t test_data_page;
+	gva_t test_data_page;
 
-	test_data_page = vm_vaddr_alloc_page(vcpu->vm);
+	test_data_page = vm_alloc_page(vcpu->vm);
 
 	vcpu_args_set(vcpu, 1, test_data_page);
 
@@ -89,7 +89,7 @@ void test_single(struct kvm_vm *vm, struct kvm_vcpu *inhibitor,
 
 	data->entered = false;
 	data->hypercall_done = false;
-	data->hcall_gpa = addr_gva2gpa(vm, vm_vaddr_alloc_pages(vm, 1));
+	data->hcall_gpa = addr_gva2gpa(vm, vm_alloc_pages(vm, 1));
 
 	set.inhibit = true;
 	vcpu_ioctl(inhibitor, KVM_HYPERV_SET_TLB_FLUSH_INHIBIT, &set);
@@ -140,10 +140,10 @@ void test_multi_flusher(struct kvm_vm *vm, struct kvm_vcpu *inhibitor,
 
 	data1->entered = false;
 	data1->hypercall_done = false;
-	data1->hcall_gpa = addr_gva2gpa(vm, vm_vaddr_alloc_pages(vm, 1));
+	data1->hcall_gpa = addr_gva2gpa(vm, vm_alloc_pages(vm, 1));
 	data2->entered = false;
 	data2->hypercall_done = false;
-	data2->hcall_gpa = addr_gva2gpa(vm, vm_vaddr_alloc_pages(vm, 1));
+	data2->hcall_gpa = addr_gva2gpa(vm, vm_alloc_pages(vm, 1));
 
 	set.inhibit = true;
 	vcpu_ioctl(inhibitor, KVM_HYPERV_SET_TLB_FLUSH_INHIBIT, &set);
@@ -206,7 +206,7 @@ void test_multi_inhibitor(struct kvm_vm *vm, struct kvm_vcpu *inhibitor1,
 
 	data->entered = false;
 	data->hypercall_done = false;
-	data->hcall_gpa = addr_gva2gpa(vm, vm_vaddr_alloc_pages(vm, 1));
+	data->hcall_gpa = addr_gva2gpa(vm, vm_alloc_pages(vm, 1));
 
 	set.inhibit = true;
 	vcpu_ioctl(inhibitor1, KVM_HYPERV_SET_TLB_FLUSH_INHIBIT, &set);
