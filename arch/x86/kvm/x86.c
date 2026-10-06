@@ -8993,6 +8993,23 @@ static int vcpu_run(struct kvm_vcpu *vcpu)
 		vcpu->arch.at_instruction_boundary = false;
 		if (kvm_vcpu_running(vcpu)) {
 			r = vcpu_enter_guest(vcpu);
+		} else if (vcpu->kvm->planes_userspace_switch) {
+			u16 higher, lower;
+
+			/*
+			 * A vCPU that is not running never enters the guest, so
+			 * emit a pending plane event here.  Otherwise a requested
+			 * plane cannot run to lift the TLB flush inhibit, and a
+			 * vCPU left non-runnable (suspended, or awaiting INIT)
+			 * with a sibling interrupt in req_exit_planes spins.
+			 */
+			kvm_pending_exit_planes(vcpu, &higher, &lower);
+			if (higher || lower) {
+				kvm_plane_event_interrupt_exit(vcpu, higher, lower);
+				r = 0;
+			} else {
+				r = vcpu_block(vcpu);
+			}
 		} else {
 			r = vcpu_block(vcpu);
 		}
