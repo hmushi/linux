@@ -101,7 +101,7 @@ void vmx_vcpu_pi_load(struct kvm_vcpu *vcpu, int cpu)
 		 */
 		raw_spin_lock(spinlock);
 		spin_acquire(&spinlock->dep_map, PI_LOCK_SCHED_OUT, 0, _RET_IP_);
-		list_del(&vt->pi_wakeup_list);
+		list_del_init(&vt->pi_wakeup_list);
 		spin_release(&spinlock->dep_map, _RET_IP_);
 		raw_spin_unlock(spinlock);
 	}
@@ -181,6 +181,11 @@ static void pi_enable_wakeup_handler(struct kvm_vcpu *vcpu)
 	 */
 	raw_spin_lock_nested(&per_cpu(wakeup_vcpus_on_cpu_lock, vcpu->cpu),
 			     PI_LOCK_SCHED_OUT);
+	/* A second put without a load in between would corrupt the list. */
+	if (WARN_ON_ONCE(!list_empty(&vt->pi_wakeup_list))) {
+		raw_spin_unlock(&per_cpu(wakeup_vcpus_on_cpu_lock, vcpu->cpu));
+		return;
+	}
 	list_add_tail(&vt->pi_wakeup_list,
 		      &per_cpu(wakeup_vcpus_on_cpu, vcpu->cpu));
 	raw_spin_unlock(&per_cpu(wakeup_vcpus_on_cpu_lock, vcpu->cpu));
@@ -258,6 +263,25 @@ void vmx_vcpu_pi_put(struct kvm_vcpu *vcpu)
 		pi_enable_wakeup_handler(vcpu);
 	else
 		pi_set_sn(pi_desc);
+}
+
+/*
+ * An idle plane vCPU stays on the wakeup list from its put to its next load,
+ * which never comes when the vCPU is destroyed instead.  Take it off.
+ */
+void vmx_vcpu_pi_free(struct kvm_vcpu *vcpu)
+{
+	struct vcpu_vt *vt = to_vt(vcpu);
+	raw_spinlock_t *spinlock;
+	unsigned long flags;
+
+	if (vcpu_to_pi_desc(vcpu)->nv != POSTED_INTR_WAKEUP_VECTOR)
+		return;
+
+	spinlock = &per_cpu(wakeup_vcpus_on_cpu_lock, vcpu->cpu);
+	raw_spin_lock_irqsave(spinlock, flags);
+	list_del_init(&vt->pi_wakeup_list);
+	raw_spin_unlock_irqrestore(spinlock, flags);
 }
 
 /*

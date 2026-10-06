@@ -7805,6 +7805,7 @@ void vmx_vcpu_free(struct kvm_vcpu *vcpu)
 
 	if (vmx_can_use_ipiv(vcpu))
 		WRITE_ONCE(vmx_pid_table(vcpu)[vcpu->vcpu_id], 0);
+	vmx_vcpu_pi_free(vcpu);
 }
 
 int vmx_vcpu_create(struct kvm_vcpu *vcpu)
