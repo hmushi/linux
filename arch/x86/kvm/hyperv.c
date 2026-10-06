@@ -1701,7 +1701,8 @@ static int kvm_hv_set_msr(struct kvm_vcpu *vcpu, u32 msr, u64 data, bool host)
 		break;
 	}
 	case HV_X64_MSR_EOI:
-		return kvm_hv_vapic_msr_write(vcpu, APIC_EOI, data);
+		/* Hyper-V performs the EOI and ignores bits 63:32 of the value. */
+		return kvm_hv_vapic_msr_write(vcpu, APIC_EOI, (u32)data);
 	case HV_X64_MSR_ICR:
 		return kvm_hv_vapic_msr_write(vcpu, APIC_ICR, data);
 	case HV_X64_MSR_TPR:
