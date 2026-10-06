@@ -7578,6 +7578,11 @@ have no result: KVM only skips the instruction when the vCPU resumes, and does
 not read kvm_run, so userspace may run another plane in between.  For every
 other hypercall userspace must complete the exit before switching planes.
 
+The in-kernel HvCallSendSyntheticClusterIpi(Ex) hypercalls honour the target
+VTL in their input: a VTL may interrupt its own level and lower ones.  A target
+VTL above the caller's returns HV_STATUS_ACCESS_DENIED, and a target VTL that
+has no plane yet returns HV_STATUS_INVALID_PARAMETER.
+
 	- KVM_EXIT_HYPERV_HCALL_XMM -- as KVM_EXIT_HYPERV_HCALL, for a fast
 
 hypercall whose input or output block is carried in XMM registers (the guest

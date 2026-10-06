@@ -2376,8 +2376,9 @@ static struct kvm_plane *kvm_hv_ipi_target_plane(struct kvm_vcpu *vcpu,
 	if (!to_kvm_hv(vcpu->kvm)->vsm_enabled || !in_vtl.use_target_vtl)
 		return vcpu->plane;
 
-	if (in_vtl.target_vtl >= KVM_MAX_PLANES)
-		return NULL;
+	/* A VTL may interrupt its own level and lower ones, never a higher one. */
+	if (in_vtl.target_vtl > vcpu->plane_level)
+		return ERR_PTR(-EACCES);
 
 	return vcpu->kvm->planes[in_vtl.target_vtl];
 }
@@ -2463,6 +2464,8 @@ check_and_send_ipi:
 	if ((vector < HV_IPI_LOW_VECTOR) || (vector > HV_IPI_HIGH_VECTOR))
 		return HV_STATUS_INVALID_HYPERCALL_INPUT;
 
+	if (IS_ERR(plane))
+		return HV_STATUS_ACCESS_DENIED;
 	if (!plane)
 		return HV_STATUS_INVALID_PARAMETER;
 
