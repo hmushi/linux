@@ -119,6 +119,18 @@ static inline int __vmx_handle_ept_violation(struct kvm_vcpu *vcpu, gpa_t gpa,
 static inline void kvm_vcpu_trigger_posted_interrupt(struct kvm_vcpu *vcpu,
 						     int pi_vec)
 {
+	/*
+	 * A plane that is not the one its thread is running cannot take a
+	 * notification: the thread's pCPU runs a sibling's VMCS, which does
+	 * not look at this plane's descriptor.  Kick the thread instead so the
+	 * running plane leaves the guest and finds the posted interrupt when
+	 * it checks the other planes.
+	 */
+	if (vcpu != READ_ONCE(vcpu->common->current_vcpu)) {
+		kvm_vcpu_kick(vcpu);
+		return;
+	}
+
 #ifdef CONFIG_SMP
 	if (kvm_vcpu_mode(vcpu) == IN_GUEST_MODE) {
 		/*

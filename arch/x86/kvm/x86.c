@@ -9170,6 +9170,10 @@ static int __kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
 	kvm_run->flags = 0;
 	kvm_load_guest_fpu(vcpu);
 
+	/* The VMX preemption timer runs only while this plane's VMCS is live. */
+	if (vcpu->kvm->has_planes && lapic_in_kernel(vcpu))
+		kvm_lapic_switch_to_hv_timer(vcpu);
+
 	kvm_vcpu_srcu_read_lock(vcpu);
 	if (unlikely(vcpu->arch.mp_state == KVM_MP_STATE_UNINITIALIZED)) {
 		if (!kvm_vcpu_wants_to_run(vcpu)) {
@@ -9267,6 +9271,10 @@ out:
 		store_regs(vcpu);
 	post_kvm_run_save(vcpu);
 	kvm_vcpu_srcu_read_unlock(vcpu);
+
+	/* A sibling plane may run next; let this plane's timer fire meanwhile. */
+	if (vcpu->kvm->has_planes && lapic_in_kernel(vcpu))
+		kvm_lapic_switch_to_sw_timer(vcpu);
 
 	kvm_sigset_deactivate(vcpu);
 	vcpu_put(vcpu);
