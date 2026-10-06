@@ -1101,6 +1101,7 @@ struct kvm_irq_routing_s390_adapter {
 struct kvm_irq_routing_hv_sint {
 	__u32 vcpu;
 	__u32 sint;
+	__u32 plane;
 };
 
 struct kvm_irq_routing_xen_evtchn {

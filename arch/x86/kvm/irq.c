@@ -342,10 +342,17 @@ int kvm_set_routing_entry(struct kvm *kvm,
 		break;
 #ifdef CONFIG_KVM_HYPERV
 	case KVM_IRQ_ROUTING_HV_SINT:
+		/*
+		 * The entry names its plane, not the fd the table was set
+		 * through: the table is VM-wide and carries every plane.
+		 */
+		if (ue->u.hv_sint.plane >= KVM_MAX_PLANES ||
+		    !kvm->planes[ue->u.hv_sint.plane])
+			return -EINVAL;
 		e->set = kvm_hv_synic_set_irq;
 		e->hv_sint.vcpu = ue->u.hv_sint.vcpu;
 		e->hv_sint.sint = ue->u.hv_sint.sint;
-		e->hv_sint.plane_level = plane_level;
+		e->hv_sint.plane_level = ue->u.hv_sint.plane;
 		break;
 #endif
 #ifdef CONFIG_KVM_XEN

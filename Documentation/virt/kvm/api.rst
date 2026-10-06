@@ -2023,6 +2023,7 @@ address_hi must be zero.
   struct kvm_irq_routing_hv_sint {
 	__u32 vcpu;
 	__u32 sint;
+	__u32 plane;
   };
 
   struct kvm_irq_routing_xen_evtchn {
@@ -2031,6 +2032,13 @@ address_hi must be zero.
 	__u32 priority;
   };
 
+
+A KVM_IRQ_ROUTING_HV_SINT entry raises the SINT of the SynIC of the vCPU
+with VP index 'vcpu' on plane 'plane' (0 is plane 0, i.e. the behaviour of
+kernels without planes).  The routing table is VM-wide, so one table holds
+the entries of every plane whichever fd it was set through.  A plane that
+has not been created yet fails KVM_SET_GSI_ROUTING with EINVAL; a plane
+whose vCPU does not exist yet drops the interrupt.
 
 When KVM_CAP_XEN_HVM includes the KVM_XEN_HVM_CONFIG_EVTCHN_2LEVEL bit
 in its indication of supported features, routing to Xen event channels
