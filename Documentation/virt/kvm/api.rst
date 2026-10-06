@@ -1545,7 +1545,7 @@ for vm-wide capabilities.
 
 :Capability: KVM_CAP_MP_STATE
 :Architectures: x86, s390, arm64, riscv, loongarch
-:Type: vcpu ioctl
+:Type: vcpu ioctl (all planes on x86)
 :Parameters: struct kvm_mp_state (out)
 :Returns: 0 on success; -1 on error
 
@@ -1626,7 +1626,7 @@ whether the vcpu is runnable.
 
 :Capability: KVM_CAP_MP_STATE
 :Architectures: x86, s390, arm64, riscv, loongarch
-:Type: vcpu ioctl
+:Type: vcpu ioctl (all planes on x86)
 :Parameters: struct kvm_mp_state (in)
 :Returns: 0 on success; -1 on error
 
@@ -1636,6 +1636,12 @@ arguments.
 On x86, this ioctl is only useful after KVM_CREATE_IRQCHIP. Without an
 in-kernel irqchip, the multiprocessing state must be maintained by userspace on
 these architectures.
+
+On x86 the multiprocessing state is kept per plane vCPU.  A vCPU created on a
+plane fd starts in KVM_MP_STATE_UNINITIALIZED unless its id is the BSP's, and
+leaves that state through an INIT delivered to its own local APIC (for example
+with KVM_SIGNAL_MSI on the plane fd) or through this ioctl.  Setting a plane
+vCPU runnable does not by itself select that plane for execution.
 
 For arm64/riscv:
 ^^^^^^^^^^^^^^^^

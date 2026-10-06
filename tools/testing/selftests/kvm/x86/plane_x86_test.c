@@ -172,6 +172,69 @@ static void test_plane_msi(void)
 	ksft_test_result_pass("signal MSI routed per plane\n");
 }
 
+/*
+ * MP_STATE is per plane vCPU: a plane vCPU whose id is not the BSP's starts
+ * uninitialized while its plane-0 sibling runs; setting it does not touch the
+ * sibling; an INIT signalled to the plane's LAPIC is accepted on the plane fd.
+ */
+static void test_plane_mp_state(void)
+{
+	struct kvm_vm *vm;
+	struct kvm_vcpu *vcpu0, *vcpu1;
+	struct kvm_plane *plane;
+	struct kvm_plane_vcpu *plane_vcpu0, *plane_vcpu1;
+	struct kvm_mp_state mp_state;
+	struct kvm_msi init_msi = MAKE_MSI(1, 0);
+	int r;
+
+	vm = vm_create_barebones_irqchip(true);
+
+	vcpu0 = __vm_vcpu_add(vm, 0);
+	vcpu_init_cpuid(vcpu0, kvm_get_supported_cpuid());
+	vcpu_set_cpuid(vcpu0);
+	vcpu1 = __vm_vcpu_add(vm, 1);
+	vcpu_init_cpuid(vcpu1, kvm_get_supported_cpuid());
+	vcpu_set_cpuid(vcpu1);
+
+	plane = vm_plane_add(vm, 1);
+	plane_vcpu0 = __vm_plane_vcpu_add(vcpu0, plane);
+	plane_vcpu1 = __vm_plane_vcpu_add(vcpu1, plane);
+
+	/* BSP id starts runnable in every plane, the others uninitialized. */
+	plane_vcpu_ioctl(plane_vcpu0, KVM_GET_MP_STATE, &mp_state);
+	TEST_ASSERT_EQ(mp_state.mp_state, KVM_MP_STATE_RUNNABLE);
+	plane_vcpu_ioctl(plane_vcpu1, KVM_GET_MP_STATE, &mp_state);
+	TEST_ASSERT_EQ(mp_state.mp_state, KVM_MP_STATE_UNINITIALIZED);
+	vcpu_ioctl(vcpu1, KVM_GET_MP_STATE, &mp_state);
+	TEST_ASSERT_EQ(mp_state.mp_state, KVM_MP_STATE_UNINITIALIZED);
+
+	/* Setting plane 1's state leaves plane 0's alone, and vice versa. */
+	mp_state.mp_state = KVM_MP_STATE_RUNNABLE;
+	plane_vcpu_ioctl(plane_vcpu1, KVM_SET_MP_STATE, &mp_state);
+	vcpu_ioctl(vcpu1, KVM_GET_MP_STATE, &mp_state);
+	TEST_ASSERT_EQ(mp_state.mp_state, KVM_MP_STATE_UNINITIALIZED);
+	plane_vcpu_ioctl(plane_vcpu1, KVM_GET_MP_STATE, &mp_state);
+	TEST_ASSERT_EQ(mp_state.mp_state, KVM_MP_STATE_RUNNABLE);
+
+	mp_state.mp_state = KVM_MP_STATE_HALTED;
+	vcpu_ioctl(vcpu1, KVM_SET_MP_STATE, &mp_state);
+	plane_vcpu_ioctl(plane_vcpu1, KVM_GET_MP_STATE, &mp_state);
+	TEST_ASSERT_EQ(mp_state.mp_state, KVM_MP_STATE_RUNNABLE);
+
+	mp_state.mp_state = KVM_MP_STATE_INIT_RECEIVED;
+	plane_vcpu_ioctl(plane_vcpu1, KVM_SET_MP_STATE, &mp_state);
+	plane_vcpu_ioctl(plane_vcpu1, KVM_GET_MP_STATE, &mp_state);
+	TEST_ASSERT_EQ(mp_state.mp_state, KVM_MP_STATE_INIT_RECEIVED);
+
+	/* An INIT to the plane's LAPIC is accepted on the plane fd. */
+	init_msi.data |= APIC_DM_INIT;
+	r = __plane_ioctl(plane, KVM_SIGNAL_MSI, &init_msi);
+	TEST_ASSERT(r == 1, "INIT to plane 1 vCPU 1. ret: %d, errno: %d", r, errno);
+
+	kvm_vm_free(vm);
+	ksft_test_result_pass("MP_STATE per plane vCPU\n");
+}
+
 int main(int argc, char *argv[])
 {
 	struct kvm_vm *vm = vm_create_barebones_irqchip(true);
@@ -181,13 +244,14 @@ int main(int argc, char *argv[])
 	TEST_REQUIRE(cap_planes && cap_planes > 1);
 
 	ksft_print_header();
-	ksft_set_plan(3);
+	ksft_set_plan(4);
 
 	pr_info("# KVM_CAP_PLANES: %d\n", cap_planes);
 
 	test_plane_regs();
 	test_plane_fpu_nonshared();
 	test_plane_msi();
+	test_plane_mp_state();
 
 	ksft_finished();
 }

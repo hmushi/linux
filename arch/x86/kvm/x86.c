@@ -3457,6 +3457,8 @@ bool kvm_arch_is_vcpu_plane_ioctl(unsigned ioctl)
 	case KVM_SET_DEBUGREGS:
 	case KVM_GET_LAPIC:
 	case KVM_SET_LAPIC:
+	case KVM_GET_MP_STATE:
+	case KVM_SET_MP_STATE:
 	case KVM_GET_MSRS:
 	case KVM_SET_MSRS:
 	case KVM_GET_NESTED_STATE:
