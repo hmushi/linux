@@ -4626,7 +4626,7 @@ capabilities will have the corresponding bits set.
 
 :Capability: KVM_CAP_MCE
 :Architectures: x86
-:Type: vcpu ioctl
+:Type: vcpu ioctl (all planes)
 :Parameters: u64 mcg_cap (in)
 :Returns: 0 on success,
          -EFAULT if u64 mcg_cap cannot be read,
