@@ -300,8 +300,12 @@ struct kvm_vmx {
 	unsigned int tss_addr;
 	bool ept_identity_pagetable_done;
 	gpa_t ept_identity_map_addr;
-	/* Posted Interrupt Descriptor (PID) table for IPI virtualization */
-	u64 *pid_table;
+	/*
+	 * Posted Interrupt Descriptor (PID) tables for IPI virtualization, one
+	 * per plane.  Planes share APIC IDs, and an IPI goes to the sender's
+	 * plane of the target, so a vCPU's VMCS points at its plane's table.
+	 */
+	u64 *pid_table[KVM_MAX_PLANES];
 };
 
 static __always_inline struct vcpu_vt *to_vt(struct kvm_vcpu *vcpu)

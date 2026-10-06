@@ -6739,7 +6739,13 @@ the VM may have, including plane 0; the plane id must be below it.  On x86
 the value is 1 unless the VM uses a split irqchip and two-dimensional paging
 (EPT or NPT), since every plane needs its own second-level page table root.
 The kvm module parameter ``max_planes`` caps the number (0, the default,
-keeps the architectural limit).
+keeps the architectural limit).  With AMD AVIC enabled the value is 1: the
+AVIC APIC ID tables are per VM and planes share APIC IDs.
+
+Planes share APIC IDs.  An interrupt a plane sends, by IPI or through its
+SynIC, reaches the same plane of the target vCPU; this holds for IPI
+virtualization too, which gives every plane its own posted-interrupt
+descriptor table.
 
 4.146 KVM_SET_PLANE_MEMORY_ATTRIBUTES
 -------------------------------------

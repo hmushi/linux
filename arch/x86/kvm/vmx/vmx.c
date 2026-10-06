@@ -4853,18 +4853,24 @@ static u32 vmx_secondary_exec_control(struct vcpu_vmx *vmx)
 
 static inline int vmx_get_pid_table_order(struct kvm *kvm)
 {
-	return get_order(kvm->arch.max_vcpu_ids * sizeof(*to_kvm_vmx(kvm)->pid_table));
+	return get_order(kvm->arch.max_vcpu_ids * sizeof(**to_kvm_vmx(kvm)->pid_table));
 }
 
-static int vmx_alloc_ipiv_pid_table(struct kvm *kvm)
+/*
+ * Allocate the PID table of a plane.  Plane 0's is allocated under kvm->lock
+ * at pre-create; a higher plane's at its first vCPU, where a sibling may be
+ * created concurrently, hence the cmpxchg.
+ */
+static int vmx_alloc_ipiv_pid_table(struct kvm *kvm, unsigned int plane)
 {
 	struct page *pages;
 	struct kvm_vmx *kvm_vmx = to_kvm_vmx(kvm);
+	u64 *table;
 
 	if (!irqchip_in_kernel(kvm) || !enable_ipiv)
 		return 0;
 
-	if (kvm_vmx->pid_table)
+	if (READ_ONCE(kvm_vmx->pid_table[plane]))
 		return 0;
 
 	pages = alloc_pages(GFP_KERNEL_ACCOUNT | __GFP_ZERO,
@@ -4872,13 +4878,20 @@ static int vmx_alloc_ipiv_pid_table(struct kvm *kvm)
 	if (!pages)
 		return -ENOMEM;
 
-	kvm_vmx->pid_table = (void *)page_address(pages);
+	table = page_address(pages);
+	if (cmpxchg(&kvm_vmx->pid_table[plane], NULL, table))
+		__free_pages(pages, vmx_get_pid_table_order(kvm));
 	return 0;
 }
 
 int vmx_vcpu_precreate(struct kvm *kvm)
 {
-	return vmx_alloc_ipiv_pid_table(kvm);
+	return vmx_alloc_ipiv_pid_table(kvm, 0);
+}
+
+static u64 *vmx_pid_table(struct kvm_vcpu *vcpu)
+{
+	return to_kvm_vmx(vcpu->kvm)->pid_table[vcpu->plane_level];
 }
 
 #define VMX_XSS_EXIT_BITMAP 0
@@ -4886,7 +4899,6 @@ int vmx_vcpu_precreate(struct kvm *kvm)
 static void init_vmcs(struct vcpu_vmx *vmx)
 {
 	struct kvm *kvm = vmx->vcpu.kvm;
-	struct kvm_vmx *kvm_vmx = to_kvm_vmx(kvm);
 
 	if (nested)
 		nested_vmx_set_vmcs_shadowing_bitmap();
@@ -4924,7 +4936,7 @@ static void init_vmcs(struct vcpu_vmx *vmx)
 	}
 
 	if (vmx_can_use_ipiv(&vmx->vcpu)) {
-		vmcs_write64(PID_POINTER_TABLE, __pa(kvm_vmx->pid_table));
+		vmcs_write64(PID_POINTER_TABLE, __pa(vmx_pid_table(&vmx->vcpu)));
 		vmcs_write16(LAST_PID_POINTER_INDEX, kvm->arch.max_vcpu_ids - 1);
 	}
 
@@ -7661,7 +7673,7 @@ void vmx_vcpu_free(struct kvm_vcpu *vcpu)
 	free_page((unsigned long)vmx->ve_info);
 
 	if (vmx_can_use_ipiv(vcpu))
-		WRITE_ONCE(to_kvm_vmx(vcpu->kvm)->pid_table[vcpu->vcpu_id], 0);
+		WRITE_ONCE(vmx_pid_table(vcpu)[vcpu->vcpu_id], 0);
 }
 
 int vmx_vcpu_create(struct kvm_vcpu *vcpu)
@@ -7749,12 +7761,18 @@ int vmx_vcpu_create(struct kvm_vcpu *vcpu)
 		vmx->ve_info = page_to_virt(page);
 	}
 
-	if (vmx_can_use_ipiv(vcpu))
-		WRITE_ONCE(to_kvm_vmx(vcpu->kvm)->pid_table[vcpu->vcpu_id],
+	if (vmx_can_use_ipiv(vcpu)) {
+		err = vmx_alloc_ipiv_pid_table(vcpu->kvm, vcpu->plane_level);
+		if (err)
+			goto free_ve_info;
+		WRITE_ONCE(vmx_pid_table(vcpu)[vcpu->vcpu_id],
 			   __pa(&vmx->vt.pi_desc) | PID_TABLE_ENTRY_VALID);
+	}
 
 	return 0;
 
+free_ve_info:
+	free_page((unsigned long)vmx->ve_info);
 free_vmcs:
 	free_loaded_vmcs(vmx->loaded_vmcs);
 free_pml:
@@ -8563,8 +8581,11 @@ void vmx_hardware_unsetup(void)
 void vmx_vm_destroy(struct kvm *kvm)
 {
 	struct kvm_vmx *kvm_vmx = to_kvm_vmx(kvm);
+	int i;
 
-	free_pages((unsigned long)kvm_vmx->pid_table, vmx_get_pid_table_order(kvm));
+	for (i = 0; i < KVM_MAX_PLANES; i++)
+		free_pages((unsigned long)kvm_vmx->pid_table[i],
+			   vmx_get_pid_table_order(kvm));
 }
 
 /*
