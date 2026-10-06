@@ -934,6 +934,8 @@ struct kvm {
 
 	struct kvm_plane *planes[KVM_MAX_PLANES];
 	bool has_planes;
+	/* KVM_CAP_PLANES_USERSPACE_SWITCH: userspace picks the plane to run */
+	bool planes_userspace_switch;
 
 	/*
 	 * created_vcpus is protected by kvm->lock, and is incremented

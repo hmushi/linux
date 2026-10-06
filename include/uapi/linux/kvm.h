@@ -148,8 +148,10 @@ struct kvm_exit_snp_req_certs {
 
 struct kvm_plane_event_exit {
 #define KVM_PLANE_EVENT_CREATE_VCPU	1
+#define KVM_PLANE_EVENT_INTERRUPT	2
 	__u32 cause;
 	__u32 plane;
+	/* KVM_PLANE_EVENT_INTERRUPT: planes in req_exit_planes with a pending interrupt */
 	__u64 extra[8];
 };
 
@@ -233,7 +235,15 @@ struct kvm_run {
 	/* in */
 	__u8 request_interrupt_window;
 	__u8 HINT_UNSAFE_IN_KVM(immediate_exit);
-	__u8 padding1[6];
+
+	/*
+	 * KVM_CAP_PLANES_USERSPACE_SWITCH: plane to run (in/out) and planes
+	 * whose pending interrupt must exit with KVM_EXIT_PLANE_EVENT (in).
+	 */
+	__u8 plane;
+	__u8 padding1;
+	__u16 req_exit_planes;
+	__u16 padding2;
 
 	/* out */
 	__u32 exit_reason;
@@ -1054,6 +1064,7 @@ struct kvm_enable_cap {
 #define KVM_CAP_HYPERV_HCALL_FAULT_EXIT 253
 #define KVM_CAP_TRANSLATE2 254
 #define KVM_CAP_HYPERV_TLB_FLUSH_INHIBIT 255
+#define KVM_CAP_PLANES_USERSPACE_SWITCH 256
 
 struct kvm_irq_routing_irqchip {
 	__u32 irqchip;

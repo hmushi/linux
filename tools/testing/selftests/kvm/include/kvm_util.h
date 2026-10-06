@@ -1083,6 +1083,8 @@ static inline struct kvm_vm *vm_create_barebones(void)
 	return ____vm_create(VM_SHAPE_DEFAULT);
 }
 
+extern bool kvm_force_split_irqchip;
+
 static inline struct kvm_vm *vm_create_barebones_irqchip(bool split)
 {
 	struct kvm_vm *vm = vm_create_barebones();

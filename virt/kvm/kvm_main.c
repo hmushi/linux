@@ -5590,6 +5590,8 @@ static int kvm_vm_ioctl_check_extension_generic(struct kvm *kvm, long arg)
 		if (kvm)
 			return kvm_arch_max_planes(kvm);
 		return 1;
+	case KVM_CAP_PLANES_USERSPACE_SWITCH:
+		return IS_ENABLED(CONFIG_X86) && (!kvm || kvm_arch_max_planes(kvm) > 1);
 	default:
 		break;
 	}
@@ -5697,6 +5699,19 @@ static int kvm_vm_ioctl_enable_cap_generic(struct kvm *kvm,
 		return 0;
 	}
 #endif
+	case KVM_CAP_PLANES_USERSPACE_SWITCH: {
+		if (cap->flags || cap->args[0])
+			return -EINVAL;
+		if (!kvm_vm_ioctl_check_extension_generic(kvm, cap->cap))
+			return -EINVAL;
+
+		/* Must be decided before any vCPU can run on a plane. */
+		guard(mutex)(&kvm->lock);
+		if (kvm->created_vcpus)
+			return -EBUSY;
+		kvm->planes_userspace_switch = true;
+		return 0;
+	}
 	case KVM_CAP_HALT_POLL: {
 		if (cap->flags || cap->args[0] != (unsigned int)cap->args[0])
 			return -EINVAL;

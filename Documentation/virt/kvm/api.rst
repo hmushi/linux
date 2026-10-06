@@ -6975,7 +6975,30 @@ This field is ignored if KVM_CAP_IMMEDIATE_EXIT is not available.
 
 ::
 
-	__u8 padding1[6];
+	/* in/out */
+	__u8 plane;
+
+With KVM_CAP_PLANES_USERSPACE_SWITCH enabled, the plane whose vCPU KVM_RUN
+executes.  Read when KVM_RUN starts; a plane that does not exist for this vCPU
+fails with EINVAL.  On return it holds the plane that was running when KVM_RUN
+exited.  Ignored, and left at 0, when the capability is not enabled.
+
+::
+
+	/* in */
+	__u16 req_exit_planes;
+
+With KVM_CAP_PLANES_USERSPACE_SWITCH enabled, a bitmap of planes.  When a vCPU
+of a plane in the bitmap, other than the running one, has an interrupt that it
+could inject, KVM_RUN returns with KVM_EXIT_PLANE_EVENT and cause
+KVM_PLANE_EVENT_INTERRUPT instead of running on.  A halted vCPU wakes up for
+this condition too.  This is how a VMM implements a privilege level whose
+interrupts pre-empt a lower one, as Hyper-V VTLs require.
+
+::
+
+	__u8 padding1;
+	__u16 padding2;
 
 	/* out */
 	__u32 exit_reason;
@@ -7781,6 +7804,28 @@ consisting of the following fields:
 ``gpa`` is set to the faulting IPA from the exception taken to KVM when
 the ``KVM_EXIT_ARM_SEA_FLAG_GPA_VALID`` flag is set. Otherwise, the value of
 ``gpa`` is unknown.
+
+::
+
+		/* KVM_EXIT_PLANE_EVENT */
+		struct kvm_plane_event_exit {
+  #define KVM_PLANE_EVENT_CREATE_VCPU	1
+  #define KVM_PLANE_EVENT_INTERRUPT	2
+			__u32 cause;
+			__u32 plane;
+			__u64 extra[8];
+		} plane_event;
+
+KVM_EXIT_PLANE_EVENT reports an event that userspace must handle on behalf of
+a plane.  'plane' is the plane of the vCPU that was running.
+
+ - KVM_PLANE_EVENT_CREATE_VCPU - the guest asked for a vCPU with APIC id
+   extra[0] in plane 'plane'; userspace is expected to create it with
+   KVM_CREATE_VCPU on that plane's fd.  Raised by SEV-SNP AP creation.
+ - KVM_PLANE_EVENT_INTERRUPT - a plane listed in kvm_run->req_exit_planes has
+   a pending interrupt; extra[0] is the bitmap of such planes.  Userspace
+   typically sets kvm_run->plane to one of them and calls KVM_RUN again.  Only
+   raised with KVM_CAP_PLANES_USERSPACE_SWITCH.
 
 ::
 
@@ -9887,6 +9932,35 @@ take care to differentiate between these cases.
 
 The presence of this capability indicates that the nested KVM guest can
 start in ESA mode.
+
+8.48 KVM_CAP_PLANES_USERSPACE_SWITCH
+------------------------------------
+
+:Architectures: x86
+:Type: vm
+:Parameters: args[0] must be 0
+:Returns: 0 on success, -EBUSY if a vCPU was already created
+
+Hands the choice of which plane runs to userspace.  Without this capability
+KVM switches planes on its own: the lowest runnable plane runs, a plane is
+made runnable by a hardware-specific request such as an SEV-SNP VMPL switch,
+and a pending interrupt, NMI or SMI for plane 0 forces a switch back to plane
+0.  That policy suits VMPLs, where the hardware defines the switch; it does
+not suit Hyper-V VTLs, where the switch is a hypercall the VMM handles and a
+higher VTL's interrupt must pre-empt a lower one.
+
+With the capability enabled:
+
+ - kvm_run->plane selects the plane that KVM_RUN executes and reports the
+   plane that was running on exit.  KVM no longer switches planes by itself.
+ - kvm_run->req_exit_planes lists the planes whose pending interrupt causes
+   KVM_EXIT_PLANE_EVENT with cause KVM_PLANE_EVENT_INTERRUPT.
+ - a pending plane-0 event does not pre-empt a higher plane.
+
+The capability must be enabled before the first vCPU is created.  It does not
+change KVM_RUN on plane vCPU fds, which stays unsupported: all planes of a vCPU
+run from its plane-0 fd, so the thread, the signal mask and the kvm_run page
+are shared.
 
 9. Known KVM API problems
 =========================

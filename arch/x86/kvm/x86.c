@@ -7898,11 +7898,52 @@ out:
 	return r;
 }
 
+/*
+ * Planes listed in kvm_run->req_exit_planes whose vCPU has an injectable
+ * interrupt.  The current plane is never reported: its interrupts are
+ * delivered the normal way.  Only used with KVM_CAP_PLANES_USERSPACE_SWITCH.
+ */
+static u16 kvm_pending_exit_planes(struct kvm_vcpu *vcpu)
+{
+	struct kvm_vcpu_common *common = vcpu->common;
+	u16 req = READ_ONCE(vcpu->run->req_exit_planes);
+	u16 pending = 0;
+	unsigned int i;
+
+	req &= ~BIT(vcpu->plane_level);
+	if (!req)
+		return 0;
+
+	for_each_set_bit(i, (unsigned long *)&req, KVM_MAX_PLANES) {
+		struct kvm_vcpu *v = common->vcpus[i];
+
+		if (v && kvm_cpu_has_injectable_intr(v))
+			pending |= BIT(i);
+	}
+
+	return pending;
+}
+
+static void kvm_plane_event_interrupt_exit(struct kvm_vcpu *vcpu, u16 pending)
+{
+	struct kvm_run *run = vcpu->run;
+
+	run->exit_reason = KVM_EXIT_PLANE_EVENT;
+	memset(&run->plane_event, 0, sizeof(run->plane_event));
+	run->plane_event.cause = KVM_PLANE_EVENT_INTERRUPT;
+	run->plane_event.plane = vcpu->plane_level;
+	run->plane_event.extra[0] = pending;
+}
+
 static inline bool kvm_check_plane0_events(struct kvm_vcpu *vcpu)
 {
 	struct kvm_vcpu *vcpu_plane0;
 
 	if (vcpu->plane_level == 0)
+		return false;
+
+	/* Userspace decides which plane runs; plane 0 does not pre-empt. */
+	if (vcpu->kvm->planes_userspace_switch)
 		return false;
 
 	vcpu_plane0 = vcpu->common->vcpus[0];
@@ -8377,6 +8418,16 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 		goto out;
 	}
 
+	if (vcpu->kvm->planes_userspace_switch) {
+		u16 pending = kvm_pending_exit_planes(vcpu);
+
+		if (pending) {
+			kvm_plane_event_interrupt_exit(vcpu, pending);
+			r = 0;
+			goto out;
+		}
+	}
+
 	if (kvm_check_request(KVM_REQ_EVENT, vcpu) || req_int_win ||
 	    kvm_xen_has_interrupt(vcpu)) {
 		++vcpu->stat.req_event;
@@ -8694,6 +8745,9 @@ bool kvm_vcpu_has_events(struct kvm_vcpu *vcpu)
 		return true;
 
 	if (kvm_test_request(KVM_REQ_PLANE_RESCHED, vcpu))
+		return true;
+
+	if (vcpu->kvm->planes_userspace_switch && kvm_pending_exit_planes(vcpu))
 		return true;
 
 	if (kvm_is_interrupt_allowed(vcpu) && kvm_cpu_has_interrupt(vcpu))
@@ -9156,13 +9210,44 @@ out:
 	return r;
 }
 
+/*
+ * With KVM_CAP_PLANES_USERSPACE_SWITCH, kvm_run->plane names the plane to
+ * run.  Make it the only runnable plane so that kvm_vcpu_select_plane()
+ * picks it; the in-kernel policy of running the lowest runnable plane is
+ * otherwise unchanged.
+ */
+static int kvm_select_plane_from_userspace(struct kvm_vcpu *vcpu_plane0)
+{
+	struct kvm_vcpu_common *common = vcpu_plane0->common;
+	u8 plane = vcpu_plane0->run->plane;
+	unsigned int i;
+
+	if (plane >= KVM_MAX_PLANES || !common->vcpus[plane])
+		return -EINVAL;
+
+	for (i = 0; i < KVM_MAX_PLANES; i++) {
+		if (common->vcpus[i])
+			common->vcpus[i]->plane_state = i == plane ? RUNNABLE : STOPPED;
+	}
+
+	return 0;
+}
+
 int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu_plane0)
 {
 	struct kvm_vcpu_common *common = vcpu_plane0->common;
+	bool userspace_switch = vcpu_plane0->kvm->planes_userspace_switch;
+	struct kvm_vcpu *vcpu;
 	int ret;
 
+	if (userspace_switch) {
+		ret = kvm_select_plane_from_userspace(vcpu_plane0);
+		if (ret)
+			return ret;
+	}
+
 	do {
-		struct kvm_vcpu *vcpu = kvm_vcpu_select_plane(vcpu_plane0);
+		vcpu = kvm_vcpu_select_plane(vcpu_plane0);
 
 		if (vcpu == NULL)
 			return -EINVAL;
@@ -9173,6 +9258,9 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu_plane0)
 		if (ret)
 		       break;
 	} while (vcpu_plane0->common->plane_switch);
+
+	if (userspace_switch)
+		vcpu_plane0->run->plane = vcpu->plane_level;
 
 	return ret;
 }

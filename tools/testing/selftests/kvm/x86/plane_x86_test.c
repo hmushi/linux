@@ -235,6 +235,104 @@ static void test_plane_mp_state(void)
 	ksft_test_result_pass("MP_STATE per plane vCPU\n");
 }
 
+static void guest_plane0(void)
+{
+	for (;;)
+		GUEST_SYNC(0);
+}
+
+static void guest_plane1(void)
+{
+	for (;;)
+		GUEST_SYNC(1);
+}
+
+/*
+ * KVM_CAP_PLANES_USERSPACE_SWITCH: kvm_run->plane picks the plane that runs,
+ * and an interrupt pending for a plane in req_exit_planes exits with
+ * KVM_EXIT_PLANE_EVENT / KVM_PLANE_EVENT_INTERRUPT instead of running on.
+ */
+static void test_plane_userspace_switch(void)
+{
+	struct kvm_vm *vm;
+	struct kvm_vcpu *vcpu;
+	struct kvm_plane *plane;
+	struct kvm_plane_vcpu *plane_vcpu;
+	struct kvm_msi msi = MAKE_MSI(0, MYVEC);
+	struct kvm_lapic_state lapic1;
+	struct kvm_sregs sregs;
+	struct kvm_regs regs;
+	struct ucall uc;
+	int r;
+
+	TEST_REQUIRE(kvm_has_cap(KVM_CAP_PLANES_USERSPACE_SWITCH));
+
+	/* Planes need a split IRQ chip; the cap must precede the first vCPU. */
+	kvm_force_split_irqchip = true;
+	vm = __vm_create(VM_SHAPE_DEFAULT, 1, 0);
+	kvm_force_split_irqchip = false;
+	vm_enable_cap(vm, KVM_CAP_PLANES_USERSPACE_SWITCH, 0);
+
+	vcpu = vm_vcpu_add(vm, 0, guest_plane0);
+	plane = vm_plane_add(vm, 1);
+	plane_vcpu = __vm_plane_vcpu_add(vcpu, plane);
+
+	/* Plane 1 shares the address space; give it plane 0's state and its own entry. */
+	vcpu_sregs_get(vcpu, &sregs);
+	plane_vcpu_ioctl(plane_vcpu, KVM_SET_SREGS, &sregs);
+	vcpu_regs_get(vcpu, &regs);
+	regs.rip = (unsigned long)guest_plane1;
+	plane_vcpu_ioctl(plane_vcpu, KVM_SET_REGS, &regs);
+	_plane_vcpu_set_msr(plane_vcpu, MSR_IA32_APICBASE,
+			    APIC_DEFAULT_GPA | MSR_IA32_APICBASE_ENABLE | X2APIC_ENABLE);
+	plane_vcpu_ioctl(plane_vcpu, KVM_GET_LAPIC, &lapic1);
+	do_enable_lapic(&lapic1);
+	plane_vcpu_ioctl(plane_vcpu, KVM_SET_LAPIC, &lapic1);
+
+	/* Plane 0 runs by default and reports itself. */
+	vcpu->run->plane = 0;
+	vcpu_run(vcpu);
+	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_SYNC);
+	TEST_ASSERT_EQ(uc.args[1], 0);
+	TEST_ASSERT_EQ(vcpu->run->plane, 0);
+
+	/* Userspace asks for plane 1: its code runs on the same KVM_RUN. */
+	vcpu->run->plane = 1;
+	vcpu_run(vcpu);
+	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_SYNC);
+	TEST_ASSERT_EQ(uc.args[1], 1);
+	TEST_ASSERT_EQ(vcpu->run->plane, 1);
+
+	/* A plane that does not exist is refused. */
+	vcpu->run->plane = 2;
+	r = _vcpu_run(vcpu);
+	TEST_ASSERT(r == -1 && errno == EINVAL, "KVM_RUN plane 2: ret %d errno %d", r, errno);
+
+	/*
+	 * Back on plane 0 with plane 1 in req_exit_planes: a pending interrupt
+	 * for plane 1 exits instead of letting plane 0 run.
+	 */
+	r = __plane_ioctl(plane, KVM_SIGNAL_MSI, &msi);
+	TEST_ASSERT(r == 1, "MSI to plane 1. ret: %d, errno: %d", r, errno);
+	vcpu->run->plane = 0;
+	vcpu->run->req_exit_planes = BIT(1);
+	vcpu_run(vcpu);
+	TEST_ASSERT_EQ(vcpu->run->exit_reason, KVM_EXIT_PLANE_EVENT);
+	TEST_ASSERT_EQ(vcpu->run->plane_event.cause, KVM_PLANE_EVENT_INTERRUPT);
+	TEST_ASSERT_EQ(vcpu->run->plane_event.plane, 0);
+	TEST_ASSERT_EQ(vcpu->run->plane_event.extra[0], BIT(1));
+	TEST_ASSERT_EQ(vcpu->run->plane, 0);
+
+	/* Without the request plane 0 simply runs. */
+	vcpu->run->req_exit_planes = 0;
+	vcpu_run(vcpu);
+	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_SYNC);
+	TEST_ASSERT_EQ(uc.args[1], 0);
+
+	kvm_vm_free(vm);
+	ksft_test_result_pass("userspace plane switch and interrupt exit\n");
+}
+
 int main(int argc, char *argv[])
 {
 	struct kvm_vm *vm = vm_create_barebones_irqchip(true);
@@ -244,7 +342,7 @@ int main(int argc, char *argv[])
 	TEST_REQUIRE(cap_planes && cap_planes > 1);
 
 	ksft_print_header();
-	ksft_set_plan(4);
+	ksft_set_plan(5);
 
 	pr_info("# KVM_CAP_PLANES: %d\n", cap_planes);
 
@@ -252,6 +350,7 @@ int main(int argc, char *argv[])
 	test_plane_fpu_nonshared();
 	test_plane_msi();
 	test_plane_mp_state();
+	test_plane_userspace_switch();
 
 	ksft_finished();
 }

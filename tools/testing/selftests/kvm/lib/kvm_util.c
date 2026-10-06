@@ -1706,10 +1706,19 @@ void *addr_gpa2alias(struct kvm_vm *vm, gpa_t gpa)
 	return (void *) ((uintptr_t) region->host_alias + offset);
 }
 
+/* Set by tests that need a split IRQ chip, e.g. to use VM planes. */
+bool kvm_force_split_irqchip;
+
 /* Create an interrupt controller chip for the specified VM. */
 void vm_create_irqchip(struct kvm_vm *vm)
 {
 	int r;
+
+	if (kvm_force_split_irqchip) {
+		vm_enable_cap(vm, KVM_CAP_SPLIT_IRQCHIP, 24);
+		vm->has_irqchip = true;
+		return;
+	}
 
 	/*
 	 * Allocate a fully in-kernel IRQ chip by default, but fall back to a
