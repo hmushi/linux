@@ -28,9 +28,12 @@
 #define PTE_DIRTY_MASK_		PTE_DIRTY_MASK(&vm->mmu)
 #define PTE_NX_MASK_		PTE_NX_MASK(&vm->mmu)
 
+/* Top level of the guest page tables; the host may give the VM 5 levels. */
+#define TOP_LEVEL		(vm->mmu.pgtable_levels)
+
 #define CHECK_ACCESSED_BIT(pte, set, start)                                     \
 	({                                                                      \
-		for (int _i = start; _i <= PG_LEVEL_512G; _i++) {               \
+		for (int _i = start; _i <= TOP_LEVEL; _i++) {                   \
 			if (set)                                                \
 				TEST_ASSERT(                                    \
 					(*pte[_i] & PTE_ACCESSED_MASK_) != 0,    \
@@ -87,7 +90,7 @@ struct kvm_translation2 kvm_translate2(struct kvm_vcpu *vcpu, uint64_t vaddr,
 }
 
 void test_translate(struct kvm_vm *vm, struct kvm_vcpu *vcpu, int index,
-		    uint64_t *pte[(PG_LEVEL_512G + 1)], gva_t vaddr)
+		    uint64_t *pte[(PG_LEVEL_256T + 1)], gva_t vaddr)
 {
 	struct kvm_translation2 translation;
 	int access = index;
@@ -108,7 +111,7 @@ void test_translate(struct kvm_vm *vm, struct kvm_vcpu *vcpu, int index,
 	if (!(access & KVM_TRANSLATE_ACCESS_EXEC))
 		new_value |= PTE_NX_MASK_;
 
-	for (int i = PG_LEVEL_4K; i <= PG_LEVEL_512G; i++)
+	for (int i = PG_LEVEL_4K; i <= TOP_LEVEL; i++)
 		*pte[i] = (*pte[i] & ~mask) | new_value;
 
 	translation = kvm_translate2(vcpu, vaddr, 0, access, pof_no_failure);
@@ -130,14 +133,14 @@ void test_translate(struct kvm_vm *vm, struct kvm_vcpu *vcpu, int index,
 	}
 
 	/* Clear accessed bits */
-	for (int i = PG_LEVEL_4K; i <= PG_LEVEL_512G; i++)
+	for (int i = PG_LEVEL_4K; i <= TOP_LEVEL; i++)
 		*pte[i] &= ~PTE_ACCESSED_MASK_;
 
 	printf("[ok]\n");
 }
 
 void test_set_bits(struct kvm_vm *vm, struct kvm_vcpu *vcpu,
-		   uint64_t *pte[(PG_LEVEL_512G + 1)], gva_t vaddr)
+		   uint64_t *pte[(PG_LEVEL_256T + 1)], gva_t vaddr)
 {
 	printf("%s ...\t", __func__);
 
@@ -167,7 +170,7 @@ void test_set_bits(struct kvm_vm *vm, struct kvm_vcpu *vcpu,
 }
 
 void test_errors(struct kvm_vm *vm, struct kvm_vcpu *vcpu,
-		 uint64_t *pte[(PG_LEVEL_512G + 1)], gva_t vaddr)
+		 uint64_t *pte[(PG_LEVEL_256T + 1)], gva_t vaddr)
 {
 	struct kvm_translation2 tr;
 
@@ -185,12 +188,16 @@ void test_errors(struct kvm_vm *vm, struct kvm_vcpu *vcpu,
 
 	uint64_t old_pte = *pte[PG_LEVEL_2M];
 
-	*pte[PG_LEVEL_2M] |= (1ull << 51); /* Set a reserved bit */
+	/*
+	 * Set a reserved bit: bits 20:13 of a 2M page entry are reserved
+	 * whatever the guest's MAXPHYADDR is.
+	 */
+	*pte[PG_LEVEL_2M] |= PTE_HUGE_MASK(&vm->mmu) | (1ull << 13);
 
 	tr = kvm_translate2(vcpu, vaddr, 0, 0, pof_page_walk);
 	TEST_ASSERT_EQ(tr.error_code, KVM_TRANSLATE_FAULT_RESERVED_BITS);
 
-	*pte[PG_LEVEL_2M] &= ~(1ull << 51);
+	*pte[PG_LEVEL_2M] = old_pte;
 
 	/* Create a GPA that's definitely not mapped */
 	*pte[PG_LEVEL_2M] |= GENMASK(35, 13);
@@ -201,7 +208,7 @@ void test_errors(struct kvm_vm *vm, struct kvm_vcpu *vcpu,
 	*pte[PG_LEVEL_2M] = old_pte;
 
 	/* Clear accessed bits */
-	for (int i = PG_LEVEL_4K; i <= PG_LEVEL_512G; i++)
+	for (int i = PG_LEVEL_4K; i <= TOP_LEVEL; i++)
 		*pte[i] &= ~PTE_ACCESSED_MASK_;
 
 	/* Try translating a non-present page */
@@ -249,12 +256,12 @@ void test_errors(struct kvm_vm *vm, struct kvm_vcpu *vcpu,
 
 /* Test page walker stability, by trying to translate with garbage PTEs */
 void test_fuzz(struct kvm_vm *vm, struct kvm_vcpu *vcpu,
-	       uint64_t *pte[(PG_LEVEL_512G + 1)], gva_t vaddr)
+	       uint64_t *pte[(PG_LEVEL_256T + 1)], gva_t vaddr)
 {
 	printf("%s ...\t", __func__);
 
 	/* Test gPTEs that point to random addresses */
-	for (int level = PG_LEVEL_4K; level < (PG_LEVEL_512G + 1); level++) {
+	for (int level = PG_LEVEL_4K; level <= TOP_LEVEL; level++) {
 		for (int i = 0; i < 10000; i++) {
 			uint64_t random_address = random() % GENMASK(29, 0) << 12;
 			*pte[level] = (*pte[level] & ~GENMASK(51, 12)) | random_address;
@@ -268,7 +275,7 @@ void test_fuzz(struct kvm_vm *vm, struct kvm_vcpu *vcpu,
 	}
 
 	/* Test gPTEs with completely random values */
-	for (int level = PG_LEVEL_4K; level < (PG_LEVEL_512G + 1); level++) {
+	for (int level = PG_LEVEL_4K; level <= TOP_LEVEL; level++) {
 		for (int i = 0; i < 10000; i++) {
 			*pte[level] = random();
 
@@ -285,7 +292,7 @@ void test_fuzz(struct kvm_vm *vm, struct kvm_vcpu *vcpu,
 
 int main(int argc, char *argv[])
 {
-	uint64_t *pte[(PG_LEVEL_512G + 1)];
+	uint64_t *pte[(PG_LEVEL_256T + 1)];
 	struct kvm_vcpu *vcpu;
 	struct kvm_sregs regs;
 	struct kvm_vm *vm;
@@ -298,7 +305,7 @@ int main(int argc, char *argv[])
 
 	vaddr = __vm_alloc_page(vm, MEM_REGION_TEST_DATA);
 
-	for (page_level = PG_LEVEL_512G; page_level > PG_LEVEL_NONE;
+	for (page_level = TOP_LEVEL; page_level > PG_LEVEL_NONE;
 	     page_level--) {
 		pte[page_level] = vm_get_pte_level(vm, vaddr, &page_level);
 	}
