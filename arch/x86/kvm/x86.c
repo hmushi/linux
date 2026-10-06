@@ -7977,37 +7977,70 @@ static bool kvm_plane_has_interrupt(struct kvm_vcpu *v)
  * Planes listed in kvm_run->req_exit_planes whose vCPU has an injectable
  * interrupt.  The current plane is never reported: its interrupts are
  * delivered the normal way.  Only used with KVM_CAP_PLANES_USERSPACE_SWITCH.
+ *
+ * @higher collects higher planes for as long as they are pending, as a
+ * switch to them is expected.  @lower collects lower planes once per
+ * transition to pending: userspace only notifies the running plane about
+ * them and runs on, so a repeat would never end.  A lower plane is reported
+ * again when its interrupt was gone in between, when userspace clears and
+ * sets its bit again, or when this plane is entered after another one ran.
  */
-static u16 kvm_pending_exit_planes(struct kvm_vcpu *vcpu)
+static void kvm_pending_exit_planes(struct kvm_vcpu *vcpu, u16 *higher,
+				    u16 *lower)
 {
 	struct kvm_vcpu_common *common = vcpu->common;
 	u16 req = READ_ONCE(vcpu->run->req_exit_planes);
-	u16 pending = 0;
 	unsigned int i;
+
+	*higher = 0;
+	*lower = 0;
+
+	vcpu->arch.lower_intr_reported &= ~(req & ~vcpu->arch.req_exit_planes_seen);
+	vcpu->arch.req_exit_planes_seen = req;
 
 	req &= ~BIT(vcpu->plane_level);
 	if (!req)
-		return 0;
+		return;
 
 	for_each_set_bit(i, (unsigned long *)&req, KVM_MAX_PLANES) {
 		struct kvm_vcpu *v = common->vcpus[i];
+		bool pending = v && kvm_plane_has_interrupt(v);
 
-		if (v && kvm_plane_has_interrupt(v))
-			pending |= BIT(i);
+		if (i > vcpu->plane_level) {
+			if (pending)
+				*higher |= BIT(i);
+		} else if (!pending) {
+			vcpu->arch.lower_intr_reported &= ~BIT(i);
+		} else if (!(vcpu->arch.lower_intr_reported & BIT(i))) {
+			*lower |= BIT(i);
+		}
 	}
-
-	return pending;
 }
 
-static void kvm_plane_event_interrupt_exit(struct kvm_vcpu *vcpu, u16 pending)
+static bool kvm_has_pending_exit_planes(struct kvm_vcpu *vcpu)
+{
+	u16 higher, lower;
+
+	kvm_pending_exit_planes(vcpu, &higher, &lower);
+	return higher || lower;
+}
+
+static void kvm_plane_event_interrupt_exit(struct kvm_vcpu *vcpu, u16 higher,
+					   u16 lower)
 {
 	struct kvm_run *run = vcpu->run;
 
 	run->exit_reason = KVM_EXIT_PLANE_EVENT;
 	memset(&run->plane_event, 0, sizeof(run->plane_event));
-	run->plane_event.cause = KVM_PLANE_EVENT_INTERRUPT;
 	run->plane_event.plane = vcpu->plane_level;
-	run->plane_event.extra[0] = pending;
+	if (higher) {
+		run->plane_event.cause = KVM_PLANE_EVENT_INTERRUPT;
+		run->plane_event.extra[0] = higher;
+	} else {
+		run->plane_event.cause = KVM_PLANE_EVENT_LOWER_INTERRUPT;
+		run->plane_event.extra[0] = lower;
+		vcpu->arch.lower_intr_reported |= lower;
+	}
 }
 
 static inline bool kvm_check_plane0_events(struct kvm_vcpu *vcpu)
@@ -8494,10 +8527,11 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 	}
 
 	if (vcpu->kvm->planes_userspace_switch) {
-		u16 pending = kvm_pending_exit_planes(vcpu);
+		u16 higher, lower;
 
-		if (pending) {
-			kvm_plane_event_interrupt_exit(vcpu, pending);
+		kvm_pending_exit_planes(vcpu, &higher, &lower);
+		if (higher || lower) {
+			kvm_plane_event_interrupt_exit(vcpu, higher, lower);
 			r = 0;
 			goto out;
 		}
@@ -8822,7 +8856,7 @@ bool kvm_vcpu_has_events(struct kvm_vcpu *vcpu)
 	if (kvm_test_request(KVM_REQ_PLANE_RESCHED, vcpu))
 		return true;
 
-	if (vcpu->kvm->planes_userspace_switch && kvm_pending_exit_planes(vcpu))
+	if (vcpu->kvm->planes_userspace_switch && kvm_has_pending_exit_planes(vcpu))
 		return true;
 
 	if (kvm_is_interrupt_allowed(vcpu) && kvm_cpu_has_interrupt(vcpu))
@@ -9335,10 +9369,16 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu_plane0)
 	}
 
 	do {
+		struct kvm_vcpu *prev = common->current_vcpu;
+
 		vcpu = kvm_vcpu_select_plane(vcpu_plane0);
 
 		if (vcpu == NULL)
 			return -EINVAL;
+
+		/* Another plane ran: lower-plane interrupts are news again. */
+		if (vcpu != prev)
+			vcpu->arch.lower_intr_reported = 0;
 
 		common->plane_switch = false;
 

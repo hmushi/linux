@@ -335,6 +335,99 @@ static void test_plane_userspace_switch(void)
 	ksft_test_result_pass("userspace plane switch and interrupt exit\n");
 }
 
+/*
+ * KVM_PLANE_EVENT_LOWER_INTERRUPT: while plane 1 runs, an interrupt pending
+ * for plane 0 is reported once; again after re-arming the request bit, and
+ * again after plane 0 ran in between.
+ */
+static void test_plane_lower_interrupt(void)
+{
+	struct kvm_vm *vm;
+	struct kvm_vcpu *vcpu;
+	struct kvm_plane *plane;
+	struct kvm_plane_vcpu *plane_vcpu;
+	struct kvm_msi msi = MAKE_MSI(0, MYVEC);
+	struct kvm_lapic_state lapic;
+	struct kvm_sregs sregs;
+	struct kvm_regs regs;
+	struct ucall uc;
+	int r;
+
+	TEST_REQUIRE(kvm_has_cap(KVM_CAP_PLANES_USERSPACE_SWITCH));
+
+	kvm_force_split_irqchip = true;
+	vm = __vm_create(VM_SHAPE_DEFAULT, 1, 0);
+	kvm_force_split_irqchip = false;
+	vm_enable_cap(vm, KVM_CAP_PLANES_USERSPACE_SWITCH, 0);
+
+	vcpu = vm_vcpu_add(vm, 0, guest_plane0);
+	plane = vm_plane_add(vm, 1);
+	plane_vcpu = __vm_plane_vcpu_add(vcpu, plane);
+
+	vcpu_set_msr(vcpu, MSR_IA32_APICBASE,
+		     APIC_DEFAULT_GPA | MSR_IA32_APICBASE_ENABLE | X2APIC_ENABLE);
+	vcpu_ioctl(vcpu, KVM_GET_LAPIC, &lapic);
+	do_enable_lapic(&lapic);
+	vcpu_ioctl(vcpu, KVM_SET_LAPIC, &lapic);
+
+	vcpu_sregs_get(vcpu, &sregs);
+	plane_vcpu_ioctl(plane_vcpu, KVM_SET_SREGS, &sregs);
+	vcpu_regs_get(vcpu, &regs);
+	regs.rip = (unsigned long)guest_plane1;
+	regs.rsp = vm_alloc_stack(vm, DEFAULT_STACK_PGS);
+	plane_vcpu_ioctl(plane_vcpu, KVM_SET_REGS, &regs);
+
+	/* Plane 1 runs with plane 0 in the request bitmap; nothing pending yet. */
+	vcpu->run->plane = 1;
+	vcpu->run->req_exit_planes = BIT(0);
+	vcpu_run(vcpu);
+	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_SYNC);
+	TEST_ASSERT_EQ(uc.args[1], 1);
+
+	/* An interrupt for plane 0 is reported once, without a switch. */
+	r = __vm_ioctl(vm, KVM_SIGNAL_MSI, &msi);
+	TEST_ASSERT(r == 1, "MSI to plane 0. ret: %d, errno: %d", r, errno);
+	vcpu_run(vcpu);
+	TEST_ASSERT_EQ(vcpu->run->exit_reason, KVM_EXIT_PLANE_EVENT);
+	TEST_ASSERT_EQ(vcpu->run->plane_event.cause, KVM_PLANE_EVENT_LOWER_INTERRUPT);
+	TEST_ASSERT_EQ(vcpu->run->plane_event.plane, 1);
+	TEST_ASSERT_EQ(vcpu->run->plane_event.extra[0], BIT(0));
+	TEST_ASSERT_EQ(vcpu->run->plane, 1);
+
+	/* Still pending (plane 0 never ran): not reported again. */
+	vcpu_run(vcpu);
+	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_SYNC);
+	TEST_ASSERT_EQ(uc.args[1], 1);
+
+	/* Re-arming the bit reports it again. */
+	vcpu->run->req_exit_planes = 0;
+	vcpu_run(vcpu);
+	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_SYNC);
+	vcpu->run->req_exit_planes = BIT(0);
+	vcpu_run(vcpu);
+	TEST_ASSERT_EQ(vcpu->run->exit_reason, KVM_EXIT_PLANE_EVENT);
+	TEST_ASSERT_EQ(vcpu->run->plane_event.cause, KVM_PLANE_EVENT_LOWER_INTERRUPT);
+	TEST_ASSERT_EQ(vcpu->run->plane_event.extra[0], BIT(0));
+
+	/* Plane 0 runs (interrupts disabled, so the vector stays pending)... */
+	vcpu->run->plane = 0;
+	vcpu->run->req_exit_planes = 0;
+	vcpu_run(vcpu);
+	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_SYNC);
+	TEST_ASSERT_EQ(uc.args[1], 0);
+
+	/* ...and on return to plane 1 the still pending interrupt is news again. */
+	vcpu->run->plane = 1;
+	vcpu->run->req_exit_planes = BIT(0);
+	vcpu_run(vcpu);
+	TEST_ASSERT_EQ(vcpu->run->exit_reason, KVM_EXIT_PLANE_EVENT);
+	TEST_ASSERT_EQ(vcpu->run->plane_event.cause, KVM_PLANE_EVENT_LOWER_INTERRUPT);
+	TEST_ASSERT_EQ(vcpu->run->plane_event.extra[0], BIT(0));
+
+	kvm_vm_free(vm);
+	ksft_test_result_pass("lower plane interrupt notification\n");
+}
+
 int main(int argc, char *argv[])
 {
 	struct kvm_vm *vm = vm_create_barebones_irqchip(true);
@@ -344,7 +437,7 @@ int main(int argc, char *argv[])
 	TEST_REQUIRE(cap_planes && cap_planes > 1);
 
 	ksft_print_header();
-	ksft_set_plan(5);
+	ksft_set_plan(6);
 
 	pr_info("# KVM_CAP_PLANES: %d\n", cap_planes);
 
@@ -353,6 +446,7 @@ int main(int argc, char *argv[])
 	test_plane_msi();
 	test_plane_mp_state();
 	test_plane_userspace_switch();
+	test_plane_lower_interrupt();
 
 	ksft_finished();
 }

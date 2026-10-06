@@ -7016,10 +7016,15 @@ exited.  Ignored, and left at 0, when the capability is not enabled.
 
 With KVM_CAP_PLANES_USERSPACE_SWITCH enabled, a bitmap of planes.  When a vCPU
 of a plane in the bitmap, other than the running one, has an interrupt that it
-could inject, KVM_RUN returns with KVM_EXIT_PLANE_EVENT and cause
-KVM_PLANE_EVENT_INTERRUPT instead of running on.  A halted vCPU wakes up for
-this condition too.  This is how a VMM implements a privilege level whose
-interrupts pre-empt a lower one, as Hyper-V VTLs require.
+could inject, KVM_RUN returns with KVM_EXIT_PLANE_EVENT instead of running on.
+A halted vCPU wakes up for this condition too.  For a plane above the running
+one the cause is KVM_PLANE_EVENT_INTERRUPT and the exit repeats on every
+KVM_RUN while the interrupt is pending: this is how a VMM implements a
+privilege level whose interrupts pre-empt a lower one, as Hyper-V VTLs
+require.  For a plane below the running one the cause is
+KVM_PLANE_EVENT_LOWER_INTERRUPT and the exit is raised once per transition to
+pending, so that userspace can tell the running plane about it and run on;
+this is how a VMM implements Hyper-V's virtual interrupt notification assist.
 
 ::
 
@@ -7868,8 +7873,9 @@ the ``KVM_EXIT_ARM_SEA_FLAG_GPA_VALID`` flag is set. Otherwise, the value of
 
 		/* KVM_EXIT_PLANE_EVENT */
 		struct kvm_plane_event_exit {
-  #define KVM_PLANE_EVENT_CREATE_VCPU	1
-  #define KVM_PLANE_EVENT_INTERRUPT	2
+  #define KVM_PLANE_EVENT_CREATE_VCPU		1
+  #define KVM_PLANE_EVENT_INTERRUPT		2
+  #define KVM_PLANE_EVENT_LOWER_INTERRUPT	3
 			__u32 cause;
 			__u32 plane;
 			__u64 extra[8];
@@ -7881,10 +7887,20 @@ a plane.  'plane' is the plane of the vCPU that was running.
  - KVM_PLANE_EVENT_CREATE_VCPU - the guest asked for a vCPU with APIC id
    extra[0] in plane 'plane'; userspace is expected to create it with
    KVM_CREATE_VCPU on that plane's fd.  Raised by SEV-SNP AP creation.
- - KVM_PLANE_EVENT_INTERRUPT - a plane listed in kvm_run->req_exit_planes has
-   a pending interrupt; extra[0] is the bitmap of such planes.  Userspace
-   typically sets kvm_run->plane to one of them and calls KVM_RUN again.  Only
-   raised with KVM_CAP_PLANES_USERSPACE_SWITCH.
+ - KVM_PLANE_EVENT_INTERRUPT - a plane above 'plane' listed in
+   kvm_run->req_exit_planes has a pending interrupt; extra[0] is the bitmap of
+   such planes.  Userspace typically sets kvm_run->plane to one of them and
+   calls KVM_RUN again.  Raised again on every KVM_RUN while the interrupt is
+   pending.  Only raised with KVM_CAP_PLANES_USERSPACE_SWITCH.
+ - KVM_PLANE_EVENT_LOWER_INTERRUPT - a plane below 'plane' listed in
+   kvm_run->req_exit_planes has an interrupt that became pending; extra[0] is
+   the bitmap of such planes.  Userspace typically notifies the running plane
+   (for Hyper-V, by raising the VINA vector in its LAPIC) and calls KVM_RUN
+   again without changing kvm_run->plane.  A lower plane is reported once, and
+   again only after its interrupt was no longer pending, after userspace
+   cleared and set its req_exit_planes bit, or after the running plane is
+   entered following a run of another plane.  Only raised with
+   KVM_CAP_PLANES_USERSPACE_SWITCH.
 
 ::
 
@@ -10035,7 +10051,8 @@ With the capability enabled:
  - kvm_run->plane selects the plane that KVM_RUN executes and reports the
    plane that was running on exit.  KVM no longer switches planes by itself.
  - kvm_run->req_exit_planes lists the planes whose pending interrupt causes
-   KVM_EXIT_PLANE_EVENT with cause KVM_PLANE_EVENT_INTERRUPT.
+   KVM_EXIT_PLANE_EVENT, with cause KVM_PLANE_EVENT_INTERRUPT for a higher
+   plane and KVM_PLANE_EVENT_LOWER_INTERRUPT for a lower one.
  - a pending plane-0 event does not pre-empt a higher plane.
 
 The capability must be enabled before the first vCPU is created.  It does not

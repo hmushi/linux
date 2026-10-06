@@ -155,11 +155,16 @@ struct kvm_exit_snp_req_certs {
 };
 
 struct kvm_plane_event_exit {
-#define KVM_PLANE_EVENT_CREATE_VCPU	1
-#define KVM_PLANE_EVENT_INTERRUPT	2
+#define KVM_PLANE_EVENT_CREATE_VCPU		1
+#define KVM_PLANE_EVENT_INTERRUPT		2
+#define KVM_PLANE_EVENT_LOWER_INTERRUPT	3
 	__u32 cause;
 	__u32 plane;
-	/* KVM_PLANE_EVENT_INTERRUPT: planes in req_exit_planes with a pending interrupt */
+	/*
+	 * KVM_PLANE_EVENT_INTERRUPT: higher planes in req_exit_planes with a
+	 * pending interrupt.  KVM_PLANE_EVENT_LOWER_INTERRUPT: lower planes in
+	 * req_exit_planes whose interrupt became pending since last reported.
+	 */
 	__u64 extra[8];
 };
 

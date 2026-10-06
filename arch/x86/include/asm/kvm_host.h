@@ -1042,6 +1042,14 @@ struct kvm_vcpu_arch {
 	bool hv_timer_parked;
 
 	/*
+	 * KVM_CAP_PLANES_USERSPACE_SWITCH: lower planes already reported with
+	 * KVM_PLANE_EVENT_LOWER_INTERRUPT while this plane runs, and the last
+	 * req_exit_planes seen, to detect userspace re-arming a bit.
+	 */
+	u16 lower_intr_reported;
+	u16 req_exit_planes_seen;
+
+	/*
 	 * Set when PDPTS were loaded directly by the userspace without
 	 * reading the guest memory
 	 */
