@@ -223,9 +223,22 @@ static bool vmx_needs_pi_wakeup(struct kvm_vcpu *vcpu)
 void vmx_vcpu_pi_put(struct kvm_vcpu *vcpu)
 {
 	struct pi_desc *pi_desc = vcpu_to_pi_desc(vcpu);
+	unsigned long flags;
 
 	if (!vmx_needs_pi_wakeup(vcpu))
 		return;
+
+	/*
+	 * An idle plane's notification lands on a pCPU running a sibling's
+	 * VMCS; the wakeup handler kicks the thread so the sibling finds it.
+	 */
+	if (vcpu->kvm->has_planes && !kvm_vcpu_preempted(vcpu) &&
+	    !kvm_vcpu_is_blocking(vcpu)) {
+		local_irq_save(flags);
+		pi_enable_wakeup_handler(vcpu);
+		local_irq_restore(flags);
+		return;
+	}
 
 	/*
 	 * If the vCPU is blocking with IRQs enabled and ISN'T being preempted,
@@ -259,9 +272,16 @@ void pi_wakeup_handler(void)
 
 	raw_spin_lock(spinlock);
 	list_for_each_entry(vt, wakeup_list, pi_wakeup_list) {
+		struct kvm_vcpu *vcpu = vt_to_vcpu(vt);
 
-		if (pi_test_on(&vt->pi_desc))
-			kvm_vcpu_wake_up(vt_to_vcpu(vt));
+		if (!pi_test_on(&vt->pi_desc))
+			continue;
+
+		/* An idle plane's thread may be running a sibling: kick it out. */
+		if (vcpu != READ_ONCE(vcpu->common->current_vcpu))
+			kvm_vcpu_kick(vcpu);
+		else
+			kvm_vcpu_wake_up(vcpu);
 	}
 	raw_spin_unlock(spinlock);
 }
