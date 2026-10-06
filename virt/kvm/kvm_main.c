@@ -166,6 +166,8 @@ void vcpu_load(struct kvm_vcpu *vcpu)
 {
 	int cpu = get_cpu();
 
+	/* The preempt notifier puts and reloads the current vCPU of the thread. */
+	WRITE_ONCE(vcpu->common->current_vcpu, vcpu);
 	__this_cpu_write(kvm_running_vcpu, vcpu->common);
 	preempt_notifier_register(&vcpu->common->preempt_notifier);
 	kvm_arch_vcpu_load(vcpu, cpu);
