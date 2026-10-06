@@ -208,6 +208,10 @@ module_param(pi_inject_timer, bint, 0644);
 static bool __read_mostly mitigate_smt_rsb;
 module_param(mitigate_smt_rsb, bool, 0444);
 
+/* Cap on the number of planes per VM, 0 selects the architectural default */
+static unsigned int __read_mostly max_planes;
+module_param(max_planes, uint, 0444);
+
 #define KVM_SUPPORTED_XCR0     (XFEATURE_MASK_FP | XFEATURE_MASK_SSE \
 				| XFEATURE_MASK_YMM | XFEATURE_MASK_BNDREGS \
 				| XFEATURE_MASK_BNDCSR | XFEATURE_MASK_AVX512 \
@@ -323,19 +327,29 @@ static struct kmem_cache *kvm_alloc_emulator_cache(void)
 
 static int emulator_fix_hypercall(struct x86_emulate_ctxt *ctxt);
 
+/*
+ * Every plane needs its own TDP root (the root role carries the plane), so
+ * planes are only offered when two-dimensional paging is in use.
+ */
 unsigned kvm_x86_default_max_planes(struct kvm *kvm)
 {
-	return 1;
+	return tdp_enabled ? KVM_MAX_PLANES : 1;
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_x86_default_max_planes);
 
 unsigned kvm_arch_max_planes(struct kvm *kvm)
 {
+	unsigned int n;
+
 	/* For now, planes are only supported with irqchip=split */
 	if (!irqchip_split(kvm))
 		return 1;
 
-	return kvm_x86_call(max_planes)(kvm);
+	n = kvm_x86_call(max_planes)(kvm);
+	if (max_planes && max_planes < n)
+		n = max_planes;
+
+	return n ?: 1;
 }
 
 struct kvm_plane *x86_alloc_plane(void)

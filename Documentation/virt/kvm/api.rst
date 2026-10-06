@@ -6734,6 +6734,13 @@ in the future may use the plane id when planes are supported by hardware (as is
 the case for VMPLs in AMD), or if KVM supports accelerated plane switch
 operations (as might be the case for Hyper-V VTLs).
 
+KVM_CHECK_EXTENSION(KVM_CAP_PLANES) on a VM fd returns the number of planes
+the VM may have, including plane 0; the plane id must be below it.  On x86
+the value is 1 unless the VM uses a split irqchip and two-dimensional paging
+(EPT or NPT), since every plane needs its own second-level page table root.
+The kvm module parameter ``max_planes`` caps the number (0, the default,
+keeps the architectural limit).
+
 4.146 KVM_SET_PLANE_MEMORY_ATTRIBUTES
 -------------------------------------
 
