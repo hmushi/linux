@@ -1,0 +1,388 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Hyper-V Virtual Secure Mode: hypercall exits, XMM payload and plane-aware
+ * SynIC and TLB flush handling.
+ */
+#include "kvm_util.h"
+#include "processor.h"
+#include "apic.h"
+#include "hyperv.h"
+#include "test_util.h"
+
+#define SINT0_VECTOR		0x40
+#define SINT0_GSI		24
+#define APIC_SPIV		0xF0
+#define APIC_IRR		0x200
+
+#define XMM_PATTERN_LO		0x1111111111111111ULL
+#define XMM_PATTERN_HI		0x2222222222222222ULL
+#define XMM_OUT_LO		0xaaaaaaaaaaaaaaaaULL
+#define XMM_OUT_HI		0xbbbbbbbbbbbbbbbbULL
+#define VTL_CALL_RAX		0x0123456789abcdefULL
+
+struct hv_tlb_flush {
+	u64 address_space;
+	u64 flags;
+	u64 processor_mask;
+} __packed;
+
+static sse128_t make_sse128(u64 lo, u64 hi)
+{
+	__sse128_u u = { .as_u64 = { lo, hi } };
+
+	return u.vec;
+}
+
+static void guest_setup_hypercalls(gpa_t hcall_gpa)
+{
+	wrmsr(HV_X64_MSR_GUEST_OS_ID, HYPERV_LINUX_OS_ID);
+	wrmsr(HV_X64_MSR_HYPERCALL, hcall_gpa);
+}
+
+/* Without KVM_CAP_HYPERV_VSM the VSM hypercalls are unknown codes. */
+static void guest_cap_off(gpa_t hcall_gpa)
+{
+	sse128_t xmm[1];
+	u64 status;
+	u8 vector;
+
+	xmm[0] = make_sse128(XMM_PATTERN_LO, XMM_PATTERN_HI);
+	guest_setup_hypercalls(hcall_gpa);
+
+	vector = __hyperv_hypercall(HVCALL_ENABLE_PARTITION_VTL | HV_HYPERCALL_FAST_BIT,
+				    0, 0, &status);
+	GUEST_ASSERT(!vector);
+	GUEST_ASSERT_EQ(status & 0xffff, HV_STATUS_INVALID_HYPERCALL_CODE);
+
+	hyperv_write_xmm_input(xmm, 1);
+	vector = __hyperv_hypercall(HVCALL_GET_VP_REGISTERS | HV_HYPERCALL_FAST_BIT,
+				    0, 0, &status);
+	GUEST_ASSERT(!vector);
+	GUEST_ASSERT_EQ(status & 0xffff, HV_STATUS_INVALID_HYPERCALL_CODE);
+
+	GUEST_DONE();
+}
+
+static void guest_cap_on(gpa_t hcall_gpa, gpa_t input_gpa)
+{
+	sse128_t xmm[3];
+	u64 status, rax;
+	u8 vector;
+
+	xmm[0] = make_sse128(XMM_PATTERN_LO, XMM_PATTERN_HI);
+	guest_setup_hypercalls(hcall_gpa);
+
+	/* Memory-based call: the input GPA travels in the exit. */
+	vector = __hyperv_hypercall(HVCALL_ENABLE_VP_VTL, input_gpa, 0, &status);
+	GUEST_ASSERT(!vector);
+	GUEST_ASSERT_EQ(status, HV_STATUS_SUCCESS);
+	GUEST_SYNC(1);
+
+	/* Fast call whose input fits the registers: no XMM exit. */
+	vector = __hyperv_hypercall(HVCALL_ENABLE_PARTITION_VTL | HV_HYPERCALL_FAST_BIT,
+				    XMM_PATTERN_LO, XMM_PATTERN_HI, &status);
+	GUEST_ASSERT(!vector);
+	GUEST_ASSERT_EQ(status, HV_STATUS_SUCCESS);
+	GUEST_SYNC(2);
+
+	/* Fast call with XMM input and output. */
+	hyperv_write_xmm_input(xmm, 1);
+	vector = __hyperv_hypercall(HVCALL_GET_VP_REGISTERS | HV_HYPERCALL_FAST_BIT,
+				    0, 0, &status);
+	GUEST_ASSERT(!vector);
+	GUEST_ASSERT_EQ(status, HV_STATUS_SUCCESS);
+	read_sse_reg(2, &xmm[2]);
+	GUEST_ASSERT_EQ(sse128_lo(xmm[2]), XMM_OUT_LO);
+	GUEST_ASSERT_EQ(sse128_hi(xmm[2]), XMM_OUT_HI);
+	GUEST_SYNC(3);
+
+	/* HvCallVtlCall leaves RAX alone. */
+	asm volatile("vmcall"
+		     : "=a" (rax)
+		     : "a" (VTL_CALL_RAX), "c" (HVCALL_VTL_CALL)
+		     : "memory", "rdx", "r8", "r9", "r10", "r11");
+	GUEST_ASSERT_EQ(rax, VTL_CALL_RAX);
+	GUEST_SYNC(4);
+
+	GUEST_DONE();
+}
+
+static void test_cap_off(void)
+{
+	struct kvm_vcpu *vcpu;
+	struct kvm_vm *vm;
+	struct ucall uc;
+	gva_t hcall_page;
+
+	vm = vm_create_with_one_vcpu(&vcpu, guest_cap_off);
+	vcpu_set_hv_cpuid(vcpu);
+	hcall_page = vm_alloc_page(vm);
+	vcpu_args_set(vcpu, 1, addr_gva2gpa(vm, hcall_page));
+
+	vcpu_run(vcpu);
+	switch (get_ucall(vcpu, &uc)) {
+	case UCALL_ABORT:
+		REPORT_GUEST_ASSERT(uc);
+	case UCALL_DONE:
+		break;
+	default:
+		TEST_FAIL("Unexpected exit %u", vcpu->run->exit_reason);
+	}
+
+	kvm_vm_free(vm);
+	ksft_test_result_pass("VSM hypercalls refused without the cap\n");
+}
+
+static void expect_hcall_exit(struct kvm_vcpu *vcpu, u32 type, u16 code)
+{
+	struct kvm_hyperv_exit *exit = &vcpu->run->hyperv;
+
+	TEST_ASSERT_EQ(vcpu->run->exit_reason, KVM_EXIT_HYPERV);
+	TEST_ASSERT_EQ(exit->type, type);
+	TEST_ASSERT_EQ(exit->u.hcall.input & 0xffff, code);
+}
+
+static void expect_sync(struct kvm_vcpu *vcpu, u64 stage)
+{
+	struct ucall uc;
+
+	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_SYNC);
+	TEST_ASSERT_EQ(uc.args[1], stage);
+}
+
+static void test_cap_on(void)
+{
+	struct kvm_hyperv_exit *exit;
+	struct kvm_vcpu *vcpu;
+	struct kvm_vm *vm;
+	struct ucall uc;
+	gva_t hcall_page, input_page;
+	gpa_t input_gpa;
+
+	vm = vm_create_with_one_vcpu(&vcpu, guest_cap_on);
+	vm_enable_cap(vm, KVM_CAP_HYPERV_VSM, 0);
+	vcpu_set_hv_cpuid(vcpu);
+	hcall_page = vm_alloc_page(vm);
+	input_page = vm_alloc_page(vm);
+	input_gpa = addr_gva2gpa(vm, input_page);
+	vcpu_args_set(vcpu, 2, addr_gva2gpa(vm, hcall_page), input_gpa);
+	exit = &vcpu->run->hyperv;
+
+	vcpu_run(vcpu);
+	expect_hcall_exit(vcpu, KVM_EXIT_HYPERV_HCALL, HVCALL_ENABLE_VP_VTL);
+	TEST_ASSERT_EQ(exit->u.hcall.params[0], input_gpa);
+	exit->u.hcall.result = HV_STATUS_SUCCESS;
+	vcpu_run(vcpu);
+	expect_sync(vcpu, 1);
+
+	vcpu_run(vcpu);
+	expect_hcall_exit(vcpu, KVM_EXIT_HYPERV_HCALL, HVCALL_ENABLE_PARTITION_VTL);
+	TEST_ASSERT_EQ(exit->u.hcall.params[0], XMM_PATTERN_LO);
+	TEST_ASSERT_EQ(exit->u.hcall.params[1], XMM_PATTERN_HI);
+	exit->u.hcall.result = HV_STATUS_SUCCESS;
+	vcpu_run(vcpu);
+	expect_sync(vcpu, 2);
+
+	vcpu_run(vcpu);
+	expect_hcall_exit(vcpu, KVM_EXIT_HYPERV_HCALL_XMM, HVCALL_GET_VP_REGISTERS);
+	TEST_ASSERT_EQ(exit->u.hcall.xmm[0].low, XMM_PATTERN_LO);
+	TEST_ASSERT_EQ(exit->u.hcall.xmm[0].high, XMM_PATTERN_HI);
+	exit->u.hcall.xmm[2].low = XMM_OUT_LO;
+	exit->u.hcall.xmm[2].high = XMM_OUT_HI;
+	exit->u.hcall.result = HV_STATUS_SUCCESS;
+	vcpu_run(vcpu);
+	expect_sync(vcpu, 3);
+
+	vcpu_run(vcpu);
+	expect_hcall_exit(vcpu, KVM_EXIT_HYPERV_HCALL, HVCALL_VTL_CALL);
+	/* Must not reach the guest's RAX. */
+	exit->u.hcall.result = HV_STATUS_INVALID_PARAMETER;
+	vcpu_run(vcpu);
+	expect_sync(vcpu, 4);
+
+	vcpu_run(vcpu);
+	switch (get_ucall(vcpu, &uc)) {
+	case UCALL_ABORT:
+		REPORT_GUEST_ASSERT(uc);
+	case UCALL_DONE:
+		break;
+	default:
+		TEST_FAIL("Unexpected exit %u", vcpu->run->exit_reason);
+	}
+
+	kvm_vm_free(vm);
+	ksft_test_result_pass("VSM hypercall exits and XMM payload\n");
+}
+
+static bool has_irr(struct kvm_lapic_state *apic, int vector)
+{
+	int bit = (APIC_IRR + (vector >> 5) * 16) * CHAR_BIT + (vector & 31);
+
+	return apic->regs[bit >> 3] & (1 << (bit & 7));
+}
+
+static void enable_lapic(struct kvm_lapic_state *apic)
+{
+	apic->regs[APIC_SPIV + 1] |= 1;
+}
+
+/* A SINT route naming plane 1 interrupts plane 1's SynIC only. */
+static void test_plane_synic(void)
+{
+	struct kvm_irq_routing *routing;
+	struct kvm_lapic_state lapic0, lapic1;
+	struct kvm_plane_vcpu *plane_vcpu;
+	struct kvm_irq_level irq_level = { .irq = SINT0_GSI, .level = 1 };
+	struct kvm_enable_cap cap = { .cap = KVM_CAP_HYPERV_SYNIC2 };
+	struct kvm_plane *plane;
+	struct kvm_vcpu *vcpu;
+	struct kvm_vm *vm;
+
+	vm = vm_create_barebones_irqchip(true);
+	vcpu = __vm_vcpu_add(vm, 0);
+	vcpu_init_cpuid(vcpu, kvm_get_supported_cpuid());
+	vcpu_set_hv_cpuid(vcpu);
+	plane = vm_plane_add(vm, 1);
+	plane_vcpu = __vm_plane_vcpu_add(vcpu, plane);
+
+	vcpu_set_msr(vcpu, MSR_IA32_APICBASE,
+		     APIC_DEFAULT_GPA | MSR_IA32_APICBASE_ENABLE | X2APIC_ENABLE);
+	vcpu_ioctl(vcpu, KVM_GET_LAPIC, &lapic0);
+	enable_lapic(&lapic0);
+	vcpu_ioctl(vcpu, KVM_SET_LAPIC, &lapic0);
+
+	_plane_vcpu_set_msr(plane_vcpu, MSR_IA32_APICBASE,
+			    APIC_DEFAULT_GPA | MSR_IA32_APICBASE_ENABLE | X2APIC_ENABLE);
+	plane_vcpu_ioctl(plane_vcpu, KVM_GET_LAPIC, &lapic1);
+	enable_lapic(&lapic1);
+	plane_vcpu_ioctl(plane_vcpu, KVM_SET_LAPIC, &lapic1);
+
+	/* Plane 1's SynIC: activated and SINT0 armed through the plane vCPU fd. */
+	plane_vcpu_ioctl(plane_vcpu, KVM_ENABLE_CAP, &cap);
+	_plane_vcpu_set_msr(plane_vcpu, HV_X64_MSR_SINT0, SINT0_VECTOR);
+
+	routing = calloc(1, sizeof(*routing) + sizeof(routing->entries[0]));
+	TEST_ASSERT(routing, "Failed to allocate routing table");
+	routing->nr = 1;
+	routing->entries[0].gsi = SINT0_GSI;
+	routing->entries[0].type = KVM_IRQ_ROUTING_HV_SINT;
+	routing->entries[0].u.hv_sint.vcpu = 0;
+	routing->entries[0].u.hv_sint.sint = 0;
+	routing->entries[0].u.hv_sint.plane = 1;
+	vm_ioctl(vm, KVM_SET_GSI_ROUTING, routing);
+	free(routing);
+
+	vm_ioctl(vm, KVM_IRQ_LINE, &irq_level);
+
+	vcpu_ioctl(vcpu, KVM_GET_LAPIC, &lapic0);
+	TEST_ASSERT(!has_irr(&lapic0, SINT0_VECTOR), "SINT vector clear in plane 0");
+	plane_vcpu_ioctl(plane_vcpu, KVM_GET_LAPIC, &lapic1);
+	TEST_ASSERT(has_irr(&lapic1, SINT0_VECTOR), "SINT vector set in plane 1");
+
+	kvm_vm_free(vm);
+	ksft_test_result_pass("SINT route on plane 1 lands in plane 1\n");
+}
+
+static void guest_plane0(void)
+{
+	GUEST_SYNC(0);
+	GUEST_DONE();
+}
+
+/* Runs on plane 1: a flush of all processors targets plane 1 only. */
+static void guest_plane1_flush(gpa_t hcall_gpa, gva_t flush_gva, gpa_t flush_gpa)
+{
+	struct hv_tlb_flush *flush = (struct hv_tlb_flush *)flush_gva;
+	u64 status;
+	u8 vector;
+
+	guest_setup_hypercalls(hcall_gpa);
+
+	flush->address_space = 0;
+	flush->flags = HV_FLUSH_ALL_PROCESSORS;
+	flush->processor_mask = 0;
+	vector = __hyperv_hypercall(HVCALL_FLUSH_VIRTUAL_ADDRESS_SPACE, flush_gpa,
+				    0, &status);
+	GUEST_ASSERT(!vector);
+	GUEST_ASSERT_EQ(status & 0xffff, HV_STATUS_SUCCESS);
+	GUEST_SYNC(1);
+	GUEST_DONE();
+}
+
+/*
+ * With the plane 0 vCPU TLB flush inhibited, a flush issued from plane 1
+ * must complete: it targets the plane 1 vCPUs, not the inhibited sibling.
+ */
+static void test_plane_tlb_flush(void)
+{
+	struct kvm_hyperv_tlb_flush_inhibit inhibit = { .inhibit = 1 };
+	struct kvm_plane_vcpu *plane_vcpu;
+	struct kvm_plane *plane;
+	struct kvm_sregs sregs;
+	struct kvm_regs regs;
+	struct kvm_vcpu *vcpu;
+	struct kvm_vm *vm;
+	gva_t hcall_page, flush_page;
+
+	TEST_REQUIRE(kvm_has_cap(KVM_CAP_PLANES_USERSPACE_SWITCH));
+	TEST_REQUIRE(kvm_has_cap(KVM_CAP_HYPERV_TLB_FLUSH_INHIBIT));
+
+	kvm_force_split_irqchip = true;
+	vm = __vm_create(VM_SHAPE_DEFAULT, 1, 0);
+	kvm_force_split_irqchip = false;
+	vm_enable_cap(vm, KVM_CAP_PLANES_USERSPACE_SWITCH, 0);
+
+	vcpu = vm_vcpu_add(vm, 0, guest_plane0);
+	vcpu_set_hv_cpuid(vcpu);
+	plane = vm_plane_add(vm, 1);
+	plane_vcpu = __vm_plane_vcpu_add(vcpu, plane);
+
+	hcall_page = vm_alloc_page(vm);
+	flush_page = vm_alloc_page(vm);
+
+	vcpu_sregs_get(vcpu, &sregs);
+	plane_vcpu_ioctl(plane_vcpu, KVM_SET_SREGS, &sregs);
+	vcpu_regs_get(vcpu, &regs);
+	regs.rip = (unsigned long)guest_plane1_flush;
+	regs.rdi = addr_gva2gpa(vm, hcall_page);
+	regs.rsi = flush_page;
+	regs.rdx = addr_gva2gpa(vm, flush_page);
+	plane_vcpu_ioctl(plane_vcpu, KVM_SET_REGS, &regs);
+
+	vcpu_ioctl(vcpu, KVM_HYPERV_SET_TLB_FLUSH_INHIBIT, &inhibit);
+
+	vcpu->run->plane = 1;
+	vcpu_run(vcpu);
+	expect_sync(vcpu, 1);
+	TEST_ASSERT_EQ(vcpu->run->plane, 1);
+
+	kvm_vm_free(vm);
+	ksft_test_result_pass("TLB flush from plane 1 targets plane 1\n");
+}
+
+int main(int argc, char *argv[])
+{
+	struct kvm_vm *vm;
+	int cap_planes;
+
+	TEST_REQUIRE(kvm_has_cap(KVM_CAP_HYPERV_VSM));
+
+	ksft_print_header();
+	ksft_set_plan(4);
+
+	test_cap_off();
+	test_cap_on();
+
+	vm = vm_create_barebones_irqchip(true);
+	cap_planes = vm_check_cap(vm, KVM_CAP_PLANES);
+	kvm_vm_free(vm);
+	if (cap_planes > 1) {
+		test_plane_synic();
+		test_plane_tlb_flush();
+	} else {
+		ksft_test_result_skip("SINT route on plane 1 lands in plane 1\n");
+		ksft_test_result_skip("TLB flush from plane 1 targets plane 1\n");
+	}
+
+	ksft_finished();
+}
