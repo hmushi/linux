@@ -1313,6 +1313,18 @@ static void __kvm_synchronize_tsc(struct kvm_vcpu *vcpu, u64 offset, u64 tsc,
 
 	kvm_vcpu_write_tsc_offset(vcpu, offset);
 
+	/*
+	 * The planes of a vCPU share its TSC and online_vcpus counts the
+	 * vCPU once, so a plane vCPU neither counts as a matching vCPU nor
+	 * starts a generation; its plane 0 sibling speaks for it.
+	 */
+	if (vcpu->plane_level) {
+		vcpu->arch.this_tsc_generation = kvm->arch.cur_tsc_generation;
+		vcpu->arch.this_tsc_nsec = kvm->arch.cur_tsc_nsec;
+		vcpu->arch.this_tsc_write = kvm->arch.cur_tsc_write;
+		return;
+	}
+
 	if (!matched) {
 		/*
 		 * We split periods of matched TSC writes into generations.
