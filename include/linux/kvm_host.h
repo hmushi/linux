@@ -163,12 +163,22 @@ static inline bool kvm_is_error_gpa(gpa_t gpa)
 #define KVM_REQUEST_NO_WAKEUP      BIT(8)
 #define KVM_REQUEST_WAIT           BIT(9)
 #define KVM_REQUEST_NO_ACTION      BIT(10)
+/*
+ * A vCPU has one plane vCPU per plane and they share a thread.  A request
+ * that acts on state a plane vCPU owns (its MMU, its TLB context, its LAPIC,
+ * its VMCS or VMCB) is per plane: it is logged on the plane vCPU it is for
+ * and handled when that plane runs.  A VM-wide request of that kind is
+ * logged on every plane.  A request that acts on shared state, or only tells
+ * the thread to leave the guest, is logged once per vCPU and handled by
+ * whichever plane runs next.
+ */
 #define KVM_REQUEST_PER_PLANE      BIT(11)
 /*
  * Architecture-independent vcpu->requests bit members
  * Bits 3-7 are reserved for more arch-independent bits.
  */
-#define KVM_REQ_TLB_FLUSH		(0 | KVM_REQUEST_WAIT | KVM_REQUEST_NO_WAKEUP)
+#define KVM_REQ_TLB_FLUSH		(0 | KVM_REQUEST_WAIT | KVM_REQUEST_NO_WAKEUP | \
+					 KVM_REQUEST_PER_PLANE)
 #define KVM_REQ_VM_DEAD			(1 | KVM_REQUEST_WAIT | KVM_REQUEST_NO_WAKEUP)
 #define KVM_REQ_UNBLOCK			2
 #define KVM_REQ_DIRTY_RING_SOFT_FULL	3
@@ -2504,6 +2514,36 @@ static __always_inline void kvm_make_request(int req, struct kvm_vcpu *vcpu)
 		     (req & KVM_REQUEST_NO_ACTION));
 
 	__kvm_make_request(req, vcpu);
+}
+
+/* Log a request on every plane of the vCPU; a shared request only once. */
+static inline void __kvm_make_request_all_planes(int req, struct kvm_vcpu *vcpu)
+{
+	struct kvm_vcpu *v;
+	int i;
+
+	if (!(req & KVM_REQUEST_PER_PLANE)) {
+		__kvm_make_request(req, vcpu);
+		return;
+	}
+
+	vcpu_for_each_plane(vcpu->common, i, v)
+		__kvm_make_request(req, v);
+}
+
+static __always_inline void kvm_make_request_all_planes(int req,
+							struct kvm_vcpu *vcpu)
+{
+	BUILD_BUG_ON(!__builtin_constant_p(req) ||
+		     (req & KVM_REQUEST_NO_ACTION));
+
+	__kvm_make_request_all_planes(req, vcpu);
+}
+
+/* The pCPU the vCPU's thread last ran a plane on; only that plane can be in guest mode. */
+static inline int kvm_vcpu_running_cpu(struct kvm_vcpu *vcpu)
+{
+	return READ_ONCE(READ_ONCE(vcpu->common->current_vcpu)->cpu);
 }
 
 #ifndef CONFIG_S390

@@ -214,13 +214,22 @@ static inline bool kvm_kick_many_cpus(struct cpumask *cpus, bool wait)
 	return true;
 }
 
+/*
+ * @all_planes: the request is for the whole vCPU, log a per-plane request
+ * on every plane of it.  Otherwise it is for @vcpu's plane alone.
+ */
 static void kvm_make_vcpu_request(struct kvm_vcpu *vcpu, unsigned int req,
-				  struct cpumask *tmp, int current_cpu)
+				  struct cpumask *tmp, int current_cpu,
+				  bool all_planes)
 {
 	int cpu;
 
-	if (likely(!(req & KVM_REQUEST_NO_ACTION)))
-		__kvm_make_request(req, vcpu);
+	if (likely(!(req & KVM_REQUEST_NO_ACTION))) {
+		if (all_planes)
+			__kvm_make_request_all_planes(req, vcpu);
+		else
+			__kvm_make_request(req, vcpu);
+	}
 
 	if (!(req & KVM_REQUEST_NO_WAKEUP) && kvm_vcpu_wake_up(vcpu))
 		return;
@@ -236,7 +245,7 @@ static void kvm_make_vcpu_request(struct kvm_vcpu *vcpu, unsigned int req,
 	 * finalized. See kvm_vcpu_kick() for more details on handling requests.
 	 */
 	if (kvm_request_needs_ipi(vcpu, req)) {
-		cpu = READ_ONCE(vcpu->cpu);
+		cpu = kvm_vcpu_running_cpu(vcpu);
 		if (cpu != -1 && cpu != current_cpu)
 			__cpumask_set_cpu(cpu, tmp);
 	}
@@ -259,7 +268,7 @@ bool kvm_make_plane_vcpus_request_mask(struct kvm_plane *plane, unsigned int req
 		vcpu = plane_get_vcpu(plane, i);
 		if (!vcpu)
 			continue;
-		kvm_make_vcpu_request(vcpu, req, cpus, me);
+		kvm_make_vcpu_request(vcpu, req, cpus, me, false);
 	}
 
 	called = kvm_kick_many_cpus(cpus, !!(req & KVM_REQUEST_WAIT));
@@ -269,10 +278,31 @@ bool kvm_make_plane_vcpus_request_mask(struct kvm_plane *plane, unsigned int req
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_make_plane_vcpus_request_mask);
 
+/* The bitmap names vCPUs; a per-plane request reaches all their planes. */
 bool kvm_make_vcpus_request_mask(struct kvm *kvm, unsigned int req,
 				 unsigned long *vcpu_bitmap)
 {
-	return kvm_make_plane_vcpus_request_mask(kvm->planes[0], req, vcpu_bitmap);
+	struct kvm_vcpu *vcpu;
+	struct cpumask *cpus;
+	int i, me;
+	bool called;
+
+	me = get_cpu();
+
+	cpus = this_cpu_cpumask_var_ptr(cpu_kick_mask);
+	cpumask_clear(cpus);
+
+	for_each_set_bit(i, vcpu_bitmap, KVM_MAX_VCPUS) {
+		vcpu = kvm_get_vcpu(kvm, i);
+		if (!vcpu)
+			continue;
+		kvm_make_vcpu_request(vcpu, req, cpus, me, true);
+	}
+
+	called = kvm_kick_many_cpus(cpus, !!(req & KVM_REQUEST_WAIT));
+	put_cpu();
+
+	return called;
 }
 
 bool kvm_make_all_cpus_request(struct kvm *kvm, unsigned int req)
@@ -289,7 +319,7 @@ bool kvm_make_all_cpus_request(struct kvm *kvm, unsigned int req)
 	cpumask_clear(cpus);
 
 	kvm_for_each_vcpu(i, vcpu, kvm)
-		kvm_make_vcpu_request(vcpu, req, cpus, me);
+		kvm_make_vcpu_request(vcpu, req, cpus, me, true);
 
 	called = kvm_kick_many_cpus(cpus, !!(req & KVM_REQUEST_WAIT));
 	put_cpu();
@@ -4252,6 +4282,7 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_request_create_plane);
  */
 void __kvm_vcpu_kick(struct kvm_vcpu *vcpu, bool wait)
 {
+	struct kvm_vcpu *running;
 	int me, cpu;
 
 	if (kvm_vcpu_wake_up(vcpu))
@@ -4262,9 +4293,10 @@ void __kvm_vcpu_kick(struct kvm_vcpu *vcpu, bool wait)
 	 * The only state change done outside the vcpu mutex is IN_GUEST_MODE
 	 * to EXITING_GUEST_MODE.  Therefore the moderately expensive "should
 	 * kick" check does not need atomic operations if kvm_vcpu_kick is used
-	 * within the vCPU thread itself.
+	 * within the vCPU thread itself, whichever plane it is for.
 	 */
-	if (vcpu == kvm_get_running_vcpu()) {
+	running = kvm_get_running_vcpu();
+	if (running && running->common == vcpu->common) {
 		if (kvm_vcpu_mode(vcpu) == IN_GUEST_MODE)
 			kvm_vcpu_set_mode(vcpu, EXITING_GUEST_MODE);
 		goto out;
@@ -4278,7 +4310,7 @@ void __kvm_vcpu_kick(struct kvm_vcpu *vcpu, bool wait)
 	 * vCPU also requires it to leave IN_GUEST_MODE.
 	 */
 	if (kvm_arch_vcpu_should_kick(vcpu)) {
-		cpu = READ_ONCE(vcpu->cpu);
+		cpu = kvm_vcpu_running_cpu(vcpu);
 		if (cpu != me && (unsigned int)cpu < nr_cpu_ids && cpu_online(cpu)) {
 			/*
 			 * Use a reschedule IPI to kick the vCPU if the caller

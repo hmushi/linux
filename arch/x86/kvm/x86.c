@@ -1680,7 +1680,7 @@ static void kvm_end_pvclock_update(struct kvm *kvm)
 	write_seqcount_end(&ka->pvclock_sc);
 	raw_spin_unlock_irq(&ka->tsc_write_lock);
 	kvm_for_each_vcpu(i, vcpu, kvm)
-		kvm_make_request(KVM_REQ_CLOCK_UPDATE, vcpu);
+		kvm_make_request_all_planes(KVM_REQ_CLOCK_UPDATE, vcpu);
 
 	/* guest entries allowed */
 	kvm_for_each_vcpu(i, vcpu, kvm)
@@ -2032,7 +2032,7 @@ static void kvm_gen_kvmclock_update(struct kvm_vcpu *v)
 	struct kvm *kvm = v->kvm;
 
 	kvm_for_each_vcpu(i, vcpu, kvm) {
-		kvm_make_request(KVM_REQ_CLOCK_UPDATE, vcpu);
+		kvm_make_request_all_planes(KVM_REQ_CLOCK_UPDATE, vcpu);
 		kvm_vcpu_kick(vcpu);
 	}
 }
@@ -6928,9 +6928,9 @@ static void __kvmclock_cpufreq_notifier(struct cpufreq_freqs *freq, int cpu)
 	mutex_lock(&kvm_lock);
 	list_for_each_entry(kvm, &vm_list, vm_list) {
 		kvm_for_each_vcpu(i, vcpu, kvm) {
-			if (vcpu->cpu != cpu)
+			if (kvm_vcpu_running_cpu(vcpu) != cpu)
 				continue;
-			kvm_make_request(KVM_REQ_CLOCK_UPDATE, vcpu);
+			kvm_make_request_all_planes(KVM_REQ_CLOCK_UPDATE, vcpu);
 			if (vcpu->cpu != raw_smp_processor_id())
 				send_ipi = 1;
 		}
@@ -10119,8 +10119,8 @@ int kvm_arch_enable_virtualization_cpu(void)
 	stable = !kvm_check_tsc_unstable();
 	list_for_each_entry(kvm, &vm_list, vm_list) {
 		kvm_for_each_vcpu(i, vcpu, kvm) {
-			if (!stable && vcpu->cpu == smp_processor_id())
-				kvm_make_request(KVM_REQ_CLOCK_UPDATE, vcpu);
+			if (!stable && kvm_vcpu_running_cpu(vcpu) == smp_processor_id())
+				kvm_make_request_all_planes(KVM_REQ_CLOCK_UPDATE, vcpu);
 			if (stable && vcpu->arch.last_host_tsc > local_tsc) {
 				backwards_tsc = true;
 				if (vcpu->arch.last_host_tsc > max_tsc)
