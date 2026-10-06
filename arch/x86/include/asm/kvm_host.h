@@ -1038,6 +1038,8 @@ struct kvm_vcpu_arch {
 	/* Protected Guests */
 	bool guest_state_protected;
 	bool guest_tsc_protected;
+	/* LAPIC timer moved to the hrtimer while a sibling plane may run */
+	bool hv_timer_parked;
 
 	/*
 	 * Set when PDPTS were loaded directly by the userspace without
