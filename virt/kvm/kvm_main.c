@@ -4956,6 +4956,19 @@ static inline bool kvm_is_vcpu_plane_ioctl(unsigned ioctl)
 	}
 }
 
+/* True before the first KVM_RUN, and for the thread that issued it. */
+static bool kvm_vcpu_ioctl_from_run_thread(struct kvm_vcpu *vcpu)
+{
+	struct kvm_vcpu_common *common = vcpu->common;
+	bool ret;
+
+	read_lock(&common->pid_lock);
+	ret = !common->pid || common->pid == task_pid(current);
+	read_unlock(&common->pid_lock);
+
+	return ret;
+}
+
 static long kvm_vcpu_ioctl(struct file *filp,
 			   unsigned int ioctl, unsigned long arg)
 {
@@ -4970,6 +4983,15 @@ static long kvm_vcpu_ioctl(struct file *filp,
 
 	if (vcpu->plane_level > 0 && !kvm_is_vcpu_plane_ioctl(ioctl))
 		return -EINVAL;
+
+	/*
+	 * The planes of a VP share one thread's state: the current plane,
+	 * the preempt notifier, the posted-interrupt wakeup entry.  Once a
+	 * thread has run the VP, only that thread may drive its vCPUs.
+	 */
+	if (vcpu->kvm->has_planes && ioctl != KVM_RUN &&
+	    !kvm_vcpu_ioctl_from_run_thread(vcpu))
+		return -EBUSY;
 
 	if (unlikely(_IOC_TYPE(ioctl) != KVMIO))
 		return -EINVAL;

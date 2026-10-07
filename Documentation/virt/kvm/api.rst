@@ -40,6 +40,11 @@ ioctls belong to the following classes:
    the documentation.  Otherwise, the first ioctl after switching threads
    could see a performance impact.
 
+   In a VM with more than one plane (see KVM_CREATE_PLANE) this is enforced:
+   once a thread has issued KVM_RUN for a vcpu, an ioctl on that vcpu or on
+   any of its plane vcpus from another thread fails with EBUSY.  KVM_RUN
+   itself may move to another thread, which then becomes the owning thread.
+
  - device ioctls: These query and set attributes that control the operation
    of a single device.
 
