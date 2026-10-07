@@ -240,6 +240,8 @@ void vmx_vcpu_pi_put(struct kvm_vcpu *vcpu)
 	if (vcpu->kvm->has_planes && !kvm_vcpu_preempted(vcpu) &&
 	    !kvm_vcpu_is_blocking(vcpu)) {
 		local_irq_save(flags);
+		/* A fresh plane vCPU is put with SN still set from its reset. */
+		pi_test_and_clear_sn(pi_desc);
 		pi_enable_wakeup_handler(vcpu);
 		local_irq_restore(flags);
 		return;
