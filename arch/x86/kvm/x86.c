@@ -7450,6 +7450,8 @@ bool kvm_vcpu_apicv_activated(struct kvm_vcpu *vcpu)
 	ulong vcpu_reasons =
 			kvm_x86_call(vcpu_get_apicv_inhibit_reasons)(vcpu);
 
+	vcpu_reasons |= kvm_hv_vcpu_apicv_inhibit_reasons(vcpu);
+
 	return (vm_reasons | vcpu_reasons) == 0;
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_vcpu_apicv_activated);

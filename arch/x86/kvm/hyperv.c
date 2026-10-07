@@ -108,7 +108,6 @@ static void synic_update_vector(struct kvm_vcpu_hv_synic *synic,
 				int vector)
 {
 	struct kvm_vcpu *vcpu = hv_synic_to_vcpu(synic);
-	struct kvm_hv *hv = to_kvm_hv(vcpu->kvm);
 	bool auto_eoi_old, auto_eoi_new;
 
 	if (vector < HV_SYNIC_FIRST_VALID_VECTOR)
@@ -128,28 +127,17 @@ static void synic_update_vector(struct kvm_vcpu_hv_synic *synic,
 
 	auto_eoi_new = !bitmap_empty(synic->auto_eoi_bitmap, 256);
 
-	if (auto_eoi_old == auto_eoi_new)
+	if (auto_eoi_old == auto_eoi_new || !enable_apicv)
 		return;
-
-	if (!enable_apicv)
-		return;
-
-	down_write(&vcpu->kvm->arch.apicv_update_lock);
-
-	if (auto_eoi_new)
-		hv->synic_auto_eoi_used++;
-	else
-		hv->synic_auto_eoi_used--;
 
 	/*
-	 * Inhibit APICv if any vCPU is using SynIC's AutoEOI, which relies on
-	 * the hypervisor to manually inject IRQs.
+	 * AutoEOI relies on KVM injecting the vector by software, so it
+	 * inhibits APICv for the vCPU that uses it.  kvm_vcpu_apicv_activated()
+	 * reads the state; the request makes the vCPU refresh its controls
+	 * before its next entry.
 	 */
-	__kvm_set_or_clear_apicv_inhibit(vcpu->kvm,
-					 APICV_INHIBIT_REASON_HYPERV,
-					 !!hv->synic_auto_eoi_used);
-
-	up_write(&vcpu->kvm->arch.apicv_update_lock);
+	kvm_make_request(KVM_REQ_APICV_UPDATE, vcpu);
+	kvm_vcpu_kick(vcpu);
 }
 
 static int synic_set_sint(struct kvm_vcpu_hv_synic *synic, int sint,
@@ -1022,6 +1010,16 @@ int kvm_hv_vcpu_init(struct kvm_vcpu *vcpu)
 	 */
 	smp_store_release(&vcpu->arch.hyperv, hv_vcpu);
 	return 0;
+}
+
+/* SynIC AutoEOI needs software injection on this vCPU only. */
+unsigned long kvm_hv_vcpu_apicv_inhibit_reasons(struct kvm_vcpu *vcpu)
+{
+	if (!to_hv_vcpu(vcpu) ||
+	    bitmap_empty(to_hv_synic(vcpu)->auto_eoi_bitmap, 256))
+		return 0;
+
+	return BIT(APICV_INHIBIT_REASON_HYPERV);
 }
 
 int kvm_hv_activate_synic(struct kvm_vcpu *vcpu, bool dont_zero_synic_pages)

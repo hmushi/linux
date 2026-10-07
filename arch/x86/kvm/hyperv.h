@@ -218,6 +218,8 @@ int kvm_hv_synic_set_irq(struct kvm_kernel_irq_routing_entry *e, struct kvm *kvm
 void kvm_hv_synic_send_eoi(struct kvm_vcpu *vcpu, int vector);
 int kvm_hv_activate_synic(struct kvm_vcpu *vcpu, bool dont_zero_synic_pages);
 
+unsigned long kvm_hv_vcpu_apicv_inhibit_reasons(struct kvm_vcpu *vcpu);
+
 static inline bool kvm_hv_synic_has_vector(struct kvm_vcpu *vcpu, int vector)
 {
 	return to_hv_vcpu(vcpu) && test_bit(vector, to_hv_synic(vcpu)->vec_bitmap);
@@ -434,6 +436,11 @@ static inline void kvm_hv_vcpu_unsuspend_tlb_flush(struct kvm_vcpu *vcpu) {}
 static inline bool kvm_hv_vcpu_suspended(struct kvm_vcpu *vcpu)
 {
 	return false;
+}
+
+static inline unsigned long kvm_hv_vcpu_apicv_inhibit_reasons(struct kvm_vcpu *vcpu)
+{
+	return 0;
 }
 static inline int kvm_hv_verify_vp_assist(struct kvm_vcpu *vcpu)
 {
