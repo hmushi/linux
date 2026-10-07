@@ -553,6 +553,121 @@ static void test_plane_not_runnable_interrupt(void)
 	ksft_test_result_pass("plane event exit from a vCPU that is not runnable\n");
 }
 
+/* CPUID.1:ECX.OSXSAVE and XGETBV must follow this plane's own CR4. */
+static void guest_check_osxsave(bool set)
+{
+	uint8_t vector;
+
+	GUEST_ASSERT_EQ(!!(get_cr4() & X86_CR4_OSXSAVE), set);
+	GUEST_ASSERT_EQ(this_cpu_has(X86_FEATURE_OSXSAVE), set);
+
+	vector = kvm_asm_safe("xgetbv", "c"(0));
+	GUEST_ASSERT_EQ(vector, set ? 0 : UD_VECTOR);
+}
+
+static void guest_cpuid_plane0(void)
+{
+	/* OSXSAVE set from the start; plane 1 runs next with it clear. */
+	guest_check_osxsave(true);
+	GUEST_SYNC(1);
+
+	/* Plane 1 cleared its own OSXSAVE last; this plane's is still set. */
+	guest_check_osxsave(true);
+	GUEST_SYNC(2);
+
+	GUEST_DONE();
+}
+
+static void guest_cpuid_plane1(void)
+{
+	/* No CR4 write yet: plane 0's OSXSAVE must not show here. */
+	guest_check_osxsave(false);
+	GUEST_SYNC(11);
+
+	set_cr4(get_cr4() | X86_CR4_OSXSAVE);
+	guest_check_osxsave(true);
+	GUEST_SYNC(12);
+
+	set_cr4(get_cr4() & ~X86_CR4_OSXSAVE);
+	guest_check_osxsave(false);
+	GUEST_SYNC(13);
+
+	for (;;)
+		GUEST_SYNC(14);
+}
+
+static void run_plane_to_sync(struct kvm_vcpu *vcpu, int plane, uint64_t stage)
+{
+	struct ucall uc;
+
+	vcpu->run->plane = plane;
+	vcpu_run(vcpu);
+	switch (get_ucall(vcpu, &uc)) {
+	case UCALL_SYNC:
+		TEST_ASSERT_EQ(uc.args[1], stage);
+		TEST_ASSERT_EQ(vcpu->run->plane, plane);
+		break;
+	case UCALL_ABORT:
+		REPORT_GUEST_ASSERT(uc);
+	default:
+		TEST_FAIL("Unexpected exit %u on plane %d", vcpu->run->exit_reason, plane);
+	}
+}
+
+/*
+ * The planes of a vCPU share the CPUID table, but the bits that follow a
+ * vCPU's own registers must be those of the plane that executes CPUID.
+ * Plane 0 keeps CR4.OSXSAVE set and plane 1 starts with it clear: each
+ * plane's CPUID.1 and XGETBV must follow its own CR4, in both directions.
+ */
+static void test_plane_cpuid_runtime(void)
+{
+	struct kvm_vm *vm;
+	struct kvm_vcpu *vcpu;
+	struct kvm_plane *plane;
+	struct kvm_plane_vcpu *plane_vcpu;
+	struct kvm_sregs sregs;
+	struct kvm_regs regs;
+	struct ucall uc;
+
+	TEST_REQUIRE(kvm_has_cap(KVM_CAP_PLANES_USERSPACE_SWITCH));
+	TEST_REQUIRE(kvm_cpu_has(X86_FEATURE_XSAVE));
+
+	kvm_force_split_irqchip = true;
+	vm = __vm_create(VM_SHAPE_DEFAULT, 1, 0);
+	kvm_force_split_irqchip = false;
+	vm_enable_cap(vm, KVM_CAP_PLANES_USERSPACE_SWITCH, 0);
+
+	vcpu = vm_vcpu_add(vm, 0, guest_cpuid_plane0);
+	plane = vm_plane_add(vm, 1);
+	plane_vcpu = __vm_plane_vcpu_add(vcpu, plane);
+
+	/* Plane 1 gets plane 0's state, but with OSXSAVE clear. */
+	vcpu_sregs_get(vcpu, &sregs);
+	TEST_ASSERT(sregs.cr4 & X86_CR4_OSXSAVE, "Plane 0 starts with OSXSAVE set");
+	sregs.cr4 &= ~X86_CR4_OSXSAVE;
+	plane_vcpu_ioctl(plane_vcpu, KVM_SET_SREGS, &sregs);
+	vcpu_regs_get(vcpu, &regs);
+	regs.rip = (unsigned long)guest_cpuid_plane1;
+	regs.rsp = vm_alloc_stack(vm, DEFAULT_STACK_PGS);
+	plane_vcpu_ioctl(plane_vcpu, KVM_SET_REGS, &regs);
+	_plane_vcpu_set_msr(plane_vcpu, MSR_IA32_APICBASE,
+			    APIC_DEFAULT_GPA | MSR_IA32_APICBASE_ENABLE | X2APIC_ENABLE);
+
+	run_plane_to_sync(vcpu, 0, 1);
+	run_plane_to_sync(vcpu, 1, 11);
+	run_plane_to_sync(vcpu, 1, 12);
+	run_plane_to_sync(vcpu, 1, 13);
+	run_plane_to_sync(vcpu, 0, 2);
+
+	vcpu->run->plane = 0;
+	vcpu_run(vcpu);
+	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_DONE);
+
+	kvm_vm_free(vm);
+	ksft_test_result_pass("CPUID runtime bits follow the executing plane\n");
+}
+
 int main(int argc, char *argv[])
 {
 	struct kvm_vm *vm = vm_create_barebones_irqchip(true);
@@ -562,7 +677,7 @@ int main(int argc, char *argv[])
 	TEST_REQUIRE(cap_planes && cap_planes > 1);
 
 	ksft_print_header();
-	ksft_set_plan(7);
+	ksft_set_plan(9);
 
 	pr_info("# KVM_CAP_PLANES: %d\n", cap_planes);
 
@@ -574,6 +689,7 @@ int main(int argc, char *argv[])
 	test_plane_userspace_switch();
 	test_plane_lower_interrupt();
 	test_plane_not_runnable_interrupt();
+	test_plane_cpuid_runtime();
 
 	ksft_finished();
 }
