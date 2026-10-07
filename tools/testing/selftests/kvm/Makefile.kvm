@@ -147,6 +147,7 @@ TEST_GEN_PROGS_x86 += x86/xapic_tpr_test
 TEST_GEN_PROGS_x86 += x86/xcr0_cpuid_test
 TEST_GEN_PROGS_x86 += x86/xss_msr_test
 TEST_GEN_PROGS_x86 += x86/debug_regs
+TEST_GEN_PROGS_x86 += x86/desc_load_exit_test
 TEST_GEN_PROGS_x86 += x86/tsc_msrs_test
 TEST_GEN_PROGS_x86 += x86/vmx_pmu_caps_test
 TEST_GEN_PROGS_x86 += x86/xen_shinfo_test
