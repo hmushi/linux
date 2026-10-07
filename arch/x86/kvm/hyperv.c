@@ -104,11 +104,34 @@ static bool synic_has_vector_auto_eoi(struct kvm_vcpu_hv_synic *synic,
 	return false;
 }
 
+/* Any auto-EOI vector, from a SINT or from userspace, needs software injection. */
+static bool synic_uses_auto_eoi(struct kvm_vcpu_hv_synic *synic)
+{
+	return !bitmap_empty(synic->auto_eoi_bitmap, 256) ||
+	       !bitmap_empty(synic->user_auto_eoi_bitmap, 256);
+}
+
+/*
+ * AutoEOI relies on KVM injecting the vector by software, so it inhibits APICv
+ * for the vCPU that uses it.  kvm_vcpu_apicv_activated() reads the state; the
+ * request makes the vCPU refresh its controls before its next entry.
+ */
+static void synic_update_apicv_inhibit(struct kvm_vcpu_hv_synic *synic,
+				       bool auto_eoi_old)
+{
+	struct kvm_vcpu *vcpu = hv_synic_to_vcpu(synic);
+
+	if (auto_eoi_old == synic_uses_auto_eoi(synic) || !enable_apicv)
+		return;
+
+	kvm_make_request(KVM_REQ_APICV_UPDATE, vcpu);
+	kvm_vcpu_kick(vcpu);
+}
+
 static void synic_update_vector(struct kvm_vcpu_hv_synic *synic,
 				int vector)
 {
-	struct kvm_vcpu *vcpu = hv_synic_to_vcpu(synic);
-	bool auto_eoi_old, auto_eoi_new;
+	bool auto_eoi_old;
 
 	if (vector < HV_SYNIC_FIRST_VALID_VECTOR)
 		return;
@@ -118,26 +141,41 @@ static void synic_update_vector(struct kvm_vcpu_hv_synic *synic,
 	else
 		__clear_bit(vector, synic->vec_bitmap);
 
-	auto_eoi_old = !bitmap_empty(synic->auto_eoi_bitmap, 256);
+	auto_eoi_old = synic_uses_auto_eoi(synic);
 
 	if (synic_has_vector_auto_eoi(synic, vector))
 		__set_bit(vector, synic->auto_eoi_bitmap);
 	else
 		__clear_bit(vector, synic->auto_eoi_bitmap);
 
-	auto_eoi_new = !bitmap_empty(synic->auto_eoi_bitmap, 256);
+	synic_update_apicv_inhibit(synic, auto_eoi_old);
+}
 
-	if (auto_eoi_old == auto_eoi_new || !enable_apicv)
-		return;
+int kvm_hv_set_auto_eoi(struct kvm_vcpu *vcpu, struct kvm_hyperv_auto_eoi *set)
+{
+	struct kvm_vcpu_hv_synic *synic;
+	bool auto_eoi_old;
+	int r;
 
-	/*
-	 * AutoEOI relies on KVM injecting the vector by software, so it
-	 * inhibits APICv for the vCPU that uses it.  kvm_vcpu_apicv_activated()
-	 * reads the state; the request makes the vCPU refresh its controls
-	 * before its next entry.
-	 */
-	kvm_make_request(KVM_REQ_APICV_UPDATE, vcpu);
-	kvm_vcpu_kick(vcpu);
+	if (set->flags || set->set > KVM_HYPERV_AUTO_EOI_SET ||
+	    set->vector < HV_SYNIC_FIRST_VALID_VECTOR ||
+	    memchr_inv(set->reserved, 0, sizeof(set->reserved)))
+		return -EINVAL;
+
+	r = kvm_hv_vcpu_init(vcpu);
+	if (r)
+		return r;
+
+	synic = to_hv_synic(vcpu);
+	auto_eoi_old = synic_uses_auto_eoi(synic);
+
+	if (set->set)
+		__set_bit(set->vector, synic->user_auto_eoi_bitmap);
+	else
+		__clear_bit(set->vector, synic->user_auto_eoi_bitmap);
+
+	synic_update_apicv_inhibit(synic, auto_eoi_old);
+	return 0;
 }
 
 static int synic_set_sint(struct kvm_vcpu_hv_synic *synic, int sint,
@@ -1012,11 +1050,17 @@ int kvm_hv_vcpu_init(struct kvm_vcpu *vcpu)
 	return 0;
 }
 
-/* SynIC AutoEOI needs software injection on this vCPU only. */
+/* Auto-EOI vectors, from a SINT or from userspace, need software injection. */
 unsigned long kvm_hv_vcpu_apicv_inhibit_reasons(struct kvm_vcpu *vcpu)
 {
-	if (!to_hv_vcpu(vcpu) ||
-	    bitmap_empty(to_hv_synic(vcpu)->auto_eoi_bitmap, 256))
+	struct kvm_vcpu_hv_synic *synic;
+
+	if (!to_hv_vcpu(vcpu))
+		return 0;
+
+	synic = to_hv_synic(vcpu);
+	if (bitmap_empty(synic->auto_eoi_bitmap, 256) &&
+	    bitmap_empty(synic->user_auto_eoi_bitmap, 256))
 		return 0;
 
 	return BIT(APICV_INHIBIT_REASON_HYPERV);

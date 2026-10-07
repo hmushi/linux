@@ -6968,6 +6968,38 @@ apart from changing the TLB flush inhibit flag of a targeted processor.
 There is no way for userspace to query the state of the flush inhibit flag.
 Userspace must keep track of the required state itself.
 
+4.148 KVM_HYPERV_SET_AUTO_EOI
+-----------------------------
+
+:Capability: KVM_CAP_HYPERV_VSM
+:Architectures: x86
+:Type: vcpu ioctl (all planes)
+:Parameters: struct kvm_hyperv_auto_eoi (in)
+:Returns: 0 on success, -EINVAL if KVM_CAP_HYPERV_VSM is not enabled, flags or
+          reserved are not zero, set is not 0 or 1, or vector is below 16
+
+::
+
+  struct kvm_hyperv_auto_eoi {
+	__u16 flags;
+	__u8  vector;
+	__u8  set;	/* KVM_HYPERV_AUTO_EOI_SET or _CLEAR */
+	__u8  reserved[4];
+  };
+
+Marks (or unmarks) an interrupt vector of the vCPU's in-kernel local APIC as
+auto-EOI: when the vCPU accepts the vector, KVM does not set its ISR bit, so
+the guest need not write EOI for it and lower priority vectors are not masked
+by it.  This is the behaviour of a SynIC SINT with the AutoEOI flag, applied to
+a vector userspace delivers itself, for instance the Hyper-V VINA vector that
+userspace injects with KVM_SIGNAL_MSI into a higher plane.  Like SynIC
+AutoEOI, a mark inhibits APICv, but only on the vCPU that carries it: that
+vCPU's interrupts are injected by software while any mark or AutoEOI SINT
+exists, and the other vCPUs of the VM keep their hardware acceleration.  A
+marked vector is delivered through the IRR as usual and is visible to
+KVM_GET_LAPIC; only its ISR bit is skipped.  The marks set by this ioctl are
+independent of the SINT configuration; a SINT write does not clear them.
+
 5. The kvm_run structure
 ========================
 

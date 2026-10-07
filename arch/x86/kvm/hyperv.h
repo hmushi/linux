@@ -48,6 +48,8 @@ struct kvm_vcpu_hv_synic {
 	atomic64_t sint[HV_SYNIC_SINT_COUNT];
 	atomic_t sint_to_gsi[HV_SYNIC_SINT_COUNT];
 	DECLARE_BITMAP(auto_eoi_bitmap, 256);
+	/* Vectors userspace asked to auto-EOI (KVM_HYPERV_SET_AUTO_EOI) */
+	DECLARE_BITMAP(user_auto_eoi_bitmap, 256);
 	DECLARE_BITMAP(vec_bitmap, 256);
 	bool active;
 	bool dont_zero_synic_pages;
@@ -228,8 +230,11 @@ static inline bool kvm_hv_synic_has_vector(struct kvm_vcpu *vcpu, int vector)
 static inline bool kvm_hv_synic_auto_eoi_set(struct kvm_vcpu *vcpu, int vector)
 {
 	return to_hv_vcpu(vcpu) &&
-	       test_bit(vector, to_hv_synic(vcpu)->auto_eoi_bitmap);
+	       (test_bit(vector, to_hv_synic(vcpu)->auto_eoi_bitmap) ||
+		test_bit(vector, to_hv_synic(vcpu)->user_auto_eoi_bitmap));
 }
+
+int kvm_hv_set_auto_eoi(struct kvm_vcpu *vcpu, struct kvm_hyperv_auto_eoi *set);
 
 void kvm_hv_vcpu_uninit(struct kvm_vcpu *vcpu);
 

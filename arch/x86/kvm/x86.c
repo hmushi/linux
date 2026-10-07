@@ -3536,6 +3536,9 @@ bool kvm_arch_is_vcpu_plane_ioctl(unsigned ioctl)
 	case KVM_SET_XSAVE:
 	case KVM_GET_REG_LIST:
 	case KVM_X86_SETUP_MCE:
+#ifdef CONFIG_KVM_HYPERV
+	case KVM_HYPERV_SET_AUTO_EOI:
+#endif
 		return true;
 	default:
 		return false;
@@ -4040,6 +4043,18 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
 		if (copy_from_user(&set, argp, sizeof(set)))
 			goto out;
 		r = kvm_vcpu_ioctl_set_tlb_flush_inhibit(vcpu, &set);
+		break;
+	}
+	case KVM_HYPERV_SET_AUTO_EOI: {
+		struct kvm_hyperv_auto_eoi set;
+
+		r = -EFAULT;
+		if (copy_from_user(&set, argp, sizeof(set)))
+			goto out;
+		r = -EINVAL;
+		if (!vcpu->kvm->arch.hyperv.vsm_enabled)
+			goto out;
+		r = kvm_hv_set_auto_eoi(vcpu, &set);
 		break;
 	}
 #endif

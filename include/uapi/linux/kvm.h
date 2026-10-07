@@ -1812,6 +1812,21 @@ struct kvm_pre_fault_memory {
 #define KVM_HYPERV_SET_TLB_FLUSH_INHIBIT \
 	_IOW(KVMIO,  0xd7, struct kvm_hyperv_tlb_flush_inhibit)
 
+/* Available with KVM_CAP_HYPERV_VSM */
+#define KVM_HYPERV_SET_AUTO_EOI \
+	_IOW(KVMIO,  0xd8, struct kvm_hyperv_auto_eoi)
+
+/* for KVM_HYPERV_SET_AUTO_EOI */
+struct kvm_hyperv_auto_eoi {
+	/* in */
+	__u16 flags;
+	__u8  vector;
+#define KVM_HYPERV_AUTO_EOI_CLEAR 0
+#define KVM_HYPERV_AUTO_EOI_SET 1
+	__u8  set;
+	__u8  reserved[4];
+};
+
 /* for KVM_HYPERV_SET_TLB_FLUSH_INHIBIT */
 struct kvm_hyperv_tlb_flush_inhibit {
 	/* in */
