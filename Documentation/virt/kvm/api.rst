@@ -7876,6 +7876,7 @@ the ``KVM_EXIT_ARM_SEA_FLAG_GPA_VALID`` flag is set. Otherwise, the value of
   #define KVM_PLANE_EVENT_CREATE_VCPU		1
   #define KVM_PLANE_EVENT_INTERRUPT		2
   #define KVM_PLANE_EVENT_LOWER_INTERRUPT	3
+  #define KVM_PLANE_EVENT_DESC_LOAD		4
 			__u32 cause;
 			__u32 plane;
 			__u64 extra[8];
@@ -7901,6 +7902,20 @@ a plane.  'plane' is the plane of the vCPU that was running.
    cleared and set its req_exit_planes bit, or after the running plane is
    entered following a run of another plane.  Only raised with
    KVM_CAP_PLANES_USERSPACE_SWITCH.
+ - KVM_PLANE_EVENT_DESC_LOAD - the vCPU of plane 'plane' executed a
+   descriptor-table load that KVM_CAP_X86_DESC_LOAD_EXIT asked to exit.  The
+   load did not run and RIP still points at the instruction.  extra[0] holds
+   the register in bits 1:0 (KVM_X86_DESC_GDTR, _IDTR, _LDTR or _TR),
+   KVM_DESC_LOAD_IS_MEMORY_OP when the operand is in memory, and the
+   instruction length in bits 15:8 (KVM_DESC_LOAD_INSN_LEN_MASK); other bits
+   are 0 and userspace must ignore them.  extra[1] is the guest virtual
+   address of a memory operand, or the number of the source general-purpose
+   register (hardware encoding, 0 is RAX) for the register form of lldt and
+   ltr.  extra[2] is the table limit for lgdt and lidt and the selector for
+   lldt and ltr.  extra[3] is the table base for lgdt and lidt (24 bits for a
+   16-bit operand size outside 64-bit mode) and 0 for lldt and ltr.
+   extra[4] to extra[7] are 0.  The checks that happen before the exit are
+   listed with the capability.
 
 ::
 
@@ -8307,6 +8322,44 @@ When enabled, KVM will disable paravirtual features provided to the
 guest according to the bits in the KVM_CPUID_FEATURES CPUID leaf
 (0x40000001). Otherwise, a guest may use the paravirtual features
 regardless of what has actually been exposed through the CPUID leaf.
+
+6.81 KVM_CAP_X86_DESC_LOAD_EXIT
+-------------------------------
+
+:Architectures: x86
+:Target: vcpu (all planes)
+:Parameters: args[0] is a bitmap of the descriptor-table loads that exit:
+             KVM_X86_DESC_LOAD_EXIT_GDTR (lgdt), KVM_X86_DESC_LOAD_EXIT_IDTR
+             (lidt), KVM_X86_DESC_LOAD_EXIT_LDTR (lldt) and
+             KVM_X86_DESC_LOAD_EXIT_TR (ltr).  0 disables the exits.
+:Returns: 0 on success, -EINVAL if args[0] has a bit that
+          KVM_CHECK_EXTENSION(KVM_CAP_X86_DESC_LOAD_EXIT) does not report.
+
+KVM_CHECK_EXTENSION returns the bitmap of loads the host can report; it is 0
+when the hardware cannot make descriptor-table instructions exit.
+
+When enabled, a load in the bitmap that this vCPU executes does not run.
+KVM_RUN returns KVM_EXIT_PLANE_EVENT with cause KVM_PLANE_EVENT_DESC_LOAD and
+the decoded instruction, see the exit's description.  The register is not
+written and RIP is not advanced, so running the vCPU again without changing
+its state repeats the exit.  Userspace completes or denies the load itself,
+for example with KVM_SET_SREGS and KVM_SET_REGS.
+
+The exit is raised only for a load that would have completed.  KVM makes the
+checks the hardware makes first and raises the fault in the guest instead: a
+load at CPL other than 0 raises #GP(0); lldt or ltr outside protected mode
+raises #UD; a memory operand that violates the segment limit or is not
+canonical raises #GP(0) or #SS(0); a page fault on the operand raises #PF;
+lgdt or lidt in 64-bit mode with a base that is not canonical raises #GP(0).
+A load executed by a nested guest is not reported.
+
+The stores (sgdt, sidt, sldt, str) and the loads that are not in the bitmap
+behave as without the capability.  While the bitmap is not empty they cause
+VM exits too, which KVM handles by emulating the instruction.  The setting
+belongs to the plane vCPU it was enabled on; each plane of a vCPU has its own.
+
+This is how a Hyper-V VSM implementation gives a higher VTL the secure
+register intercepts it arms with HV_X64_REGISTER_CR_INTERCEPT_CONTROL.
 
 .. _KVM_CAP_DIRTY_LOG_RING:
 

@@ -523,6 +523,14 @@ static bool vt_get_if_flag(struct kvm_vcpu *vcpu)
 	return vmx_get_if_flag(vcpu);
 }
 
+static int vt_set_desc_load_exit(struct kvm_vcpu *vcpu, u8 mask)
+{
+	if (is_td_vcpu(vcpu))
+		return mask ? -EINVAL : 0;
+
+	return vmx_set_desc_load_exit(vcpu, mask);
+}
+
 static void vt_flush_tlb_all(struct kvm_vcpu *vcpu)
 {
 	if (is_td_vcpu(vcpu)) {
@@ -941,6 +949,7 @@ struct kvm_x86_ops vt_x86_ops __initdata = {
 	.get_rflags = vt_op(get_rflags),
 	.set_rflags = vt_op(set_rflags),
 	.get_if_flag = vt_op(get_if_flag),
+	.set_desc_load_exit = vt_op(set_desc_load_exit),
 
 	.flush_tlb_all = vt_op(flush_tlb_all),
 	.flush_tlb_current = vt_op(flush_tlb_current),

@@ -282,6 +282,8 @@ struct kvm_caps {
 	bool has_bus_lock_exit;
 	/* notify VM exit supported? */
 	bool has_notify_vmexit;
+	/* KVM_CAP_X86_DESC_LOAD_EXIT: loads that can exit to userspace */
+	u8 supported_desc_load_exit;
 	/* bit mask of VM types */
 	u32 supported_vm_types;
 
@@ -1625,6 +1627,7 @@ struct kvm_x86_ops {
 	unsigned long (*get_rflags)(struct kvm_vcpu *vcpu);
 	void (*set_rflags)(struct kvm_vcpu *vcpu, unsigned long rflags);
 	bool (*get_if_flag)(struct kvm_vcpu *vcpu);
+	int (*set_desc_load_exit)(struct kvm_vcpu *vcpu, u8 mask);
 
 	void (*flush_tlb_all)(struct kvm_vcpu *vcpu);
 	void (*flush_tlb_current)(struct kvm_vcpu *vcpu);

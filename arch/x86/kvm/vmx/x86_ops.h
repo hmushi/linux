@@ -80,6 +80,7 @@ void vmx_cache_reg(struct kvm_vcpu *vcpu, enum kvm_reg reg);
 unsigned long vmx_get_rflags(struct kvm_vcpu *vcpu);
 void vmx_set_rflags(struct kvm_vcpu *vcpu, unsigned long rflags);
 bool vmx_get_if_flag(struct kvm_vcpu *vcpu);
+int vmx_set_desc_load_exit(struct kvm_vcpu *vcpu, u8 mask);
 void vmx_flush_tlb_all(struct kvm_vcpu *vcpu);
 void vmx_flush_tlb_current(struct kvm_vcpu *vcpu);
 void vmx_flush_tlb_gva(struct kvm_vcpu *vcpu, gva_t addr, bool *full);

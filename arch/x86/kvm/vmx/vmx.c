@@ -27,6 +27,7 @@
 #include <linux/slab.h>
 #include <linux/tboot.h>
 #include <linux/trace_events.h>
+#include <linux/unaligned.h>
 
 #include <asm/apic.h>
 #include <asm/asm.h>
@@ -1677,6 +1678,24 @@ void vmx_set_rflags(struct kvm_vcpu *vcpu, unsigned long rflags)
 bool vmx_get_if_flag(struct kvm_vcpu *vcpu)
 {
 	return vmx_get_rflags(vcpu) & X86_EFLAGS_IF;
+}
+
+/*
+ * Keep descriptor-table exiting on while userspace wants load exits.  When it
+ * does not, leave the control to UMIP emulation, which owns it otherwise.
+ */
+int vmx_set_desc_load_exit(struct kvm_vcpu *vcpu, u8 mask)
+{
+	struct vcpu_vmx *vmx = to_vmx(vcpu);
+
+	vmx->desc_load_exit = mask;
+	if (mask)
+		secondary_exec_controls_setbit(vmx, SECONDARY_EXEC_DESC);
+	else if (!(vmx_umip_emulated() && kvm_is_cr4_bit_set(vcpu, X86_CR4_UMIP)) &&
+		 (!is_guest_mode(vcpu) ||
+		  !nested_cpu_has2(get_vmcs12(vcpu), SECONDARY_EXEC_DESC)))
+		secondary_exec_controls_clearbit(vmx, SECONDARY_EXEC_DESC);
+	return 0;
 }
 
 u32 vmx_get_interrupt_shadow(struct kvm_vcpu *vcpu)
@@ -3604,8 +3623,9 @@ void vmx_set_cr4(struct kvm_vcpu *vcpu, unsigned long cr4)
 		if (cr4 & X86_CR4_UMIP) {
 			secondary_exec_controls_setbit(vmx, SECONDARY_EXEC_DESC);
 			hw_cr4 &= ~X86_CR4_UMIP;
-		} else if (!is_guest_mode(vcpu) ||
-			!nested_cpu_has2(get_vmcs12(vcpu), SECONDARY_EXEC_DESC)) {
+		} else if (!vmx->desc_load_exit &&
+			   (!is_guest_mode(vcpu) ||
+			    !nested_cpu_has2(get_vmcs12(vcpu), SECONDARY_EXEC_DESC))) {
 			secondary_exec_controls_clearbit(vmx, SECONDARY_EXEC_DESC);
 		}
 	}
@@ -5675,15 +5695,126 @@ static int handle_set_cr4(struct kvm_vcpu *vcpu, unsigned long val)
 		return kvm_set_cr4(vcpu, val);
 }
 
+/*
+ * VM-exit instruction information for the descriptor-table instructions.
+ * Bits 29:28 identify the instruction: 0 and 1 are the stores (sgdt/sidt,
+ * sldt/str), 2 and 3 the loads (lgdt/lidt, lldt/ltr).  Bit 10 is set for the
+ * register form of lldt/ltr, with the register in bits 6:3.  Bit 11 is the
+ * operand size of lgdt/lidt outside 64-bit mode (0: 16-bit, 24-bit base, 5
+ * bytes read).
+ */
+#define VMX_DESC_INSN_LOAD		BIT(29)
+#define VMX_DESC_INSN_IDT_OR_TR		BIT(28)
+#define VMX_DESC_INSN_REG_FORM		BIT(10)
+#define VMX_DESC_INSN_REG(info)		(((info) >> 3) & 0xf)
+#define VMX_DESC_INSN_OPSIZE_32		BIT(11)
+
+/*
+ * Report a descriptor-table load to userspace instead of executing it.  The
+ * checks the hardware makes before loading come first, so that an exit means
+ * the load would have completed: a load that faults keeps faulting natively.
+ */
+static int handle_desc_load_exit(struct kvm_vcpu *vcpu, u32 info, int reg)
+{
+	struct kvm_run *run = vcpu->run;
+	struct x86_exception e;
+	u64 what = reg, base = 0, operand = 0;
+	u16 limit_or_sel;
+	u8 buf[10] = {};
+	gva_t gva;
+	int len, r;
+
+	if (reg >= KVM_X86_DESC_LDTR &&
+	    (!is_protmode(vcpu) || (kvm_get_rflags(vcpu) & X86_EFLAGS_VM))) {
+		kvm_queue_exception(vcpu, UD_VECTOR);
+		return 1;
+	}
+
+	if (vmx_get_cpl(vcpu)) {
+		kvm_queue_exception_e(vcpu, GP_VECTOR, 0);
+		return 1;
+	}
+
+	if (reg >= KVM_X86_DESC_LDTR && (info & VMX_DESC_INSN_REG_FORM)) {
+		operand = VMX_DESC_INSN_REG(info);
+		limit_or_sel = kvm_register_read(vcpu, operand);
+		goto report;
+	}
+
+	if (reg >= KVM_X86_DESC_LDTR)
+		len = 2;
+	else if (is_64_bit_mode(vcpu))
+		len = 10;
+	else
+		len = (info & VMX_DESC_INSN_OPSIZE_32) ? 6 : 5;
+
+	if (get_vmx_mem_address(vcpu, vmx_get_exit_qual(vcpu), info, false,
+				len, &gva))
+		return 1;
+
+	r = kvm_read_guest_virt(vcpu, gva, buf, len, &e);
+	if (r != X86EMUL_CONTINUE)
+		return kvm_handle_memory_failure(vcpu, r, &e);
+
+	limit_or_sel = get_unaligned_le16(buf);
+	if (reg < KVM_X86_DESC_LDTR) {
+		if (len == 10) {
+			base = get_unaligned_le64(buf + 2);
+			if (is_noncanonical_base_address(base, vcpu)) {
+				kvm_queue_exception_e(vcpu, GP_VECTOR, 0);
+				return 1;
+			}
+		} else {
+			/* A 16-bit operand size reads a 24-bit base. */
+			base = get_unaligned_le32(buf + 2);
+		}
+	}
+	operand = gva;
+	what |= KVM_DESC_LOAD_IS_MEMORY_OP;
+
+report:
+	what |= (u64)vmcs_read32(VM_EXIT_INSTRUCTION_LEN) <<
+		KVM_DESC_LOAD_INSN_LEN_SHIFT;
+
+	run->exit_reason = KVM_EXIT_PLANE_EVENT;
+	memset(&run->plane_event, 0, sizeof(run->plane_event));
+	run->plane_event.cause = KVM_PLANE_EVENT_DESC_LOAD;
+	run->plane_event.plane = vcpu->plane_level;
+	run->plane_event.extra[0] = what;
+	run->plane_event.extra[1] = operand;
+	run->plane_event.extra[2] = limit_or_sel;
+	run->plane_event.extra[3] = base;
+	return 0;
+}
+
 static int handle_desc(struct kvm_vcpu *vcpu)
 {
+	u32 info = vmcs_read32(VMX_INSTRUCTION_INFO);
+	int reg;
+
 	/*
 	 * UMIP emulation relies on intercepting writes to CR4.UMIP, i.e. this
 	 * and other code needs to be updated if UMIP can be guest owned.
 	 */
 	BUILD_BUG_ON(KVM_POSSIBLE_CR4_GUEST_BITS & X86_CR4_UMIP);
 
-	WARN_ON_ONCE(!kvm_is_cr4_bit_set(vcpu, X86_CR4_UMIP));
+	WARN_ON_ONCE(!kvm_is_cr4_bit_set(vcpu, X86_CR4_UMIP) &&
+		     !to_vmx(vcpu)->desc_load_exit);
+
+	/*
+	 * Loads that userspace asked for exit to it.  A nested guest's load
+	 * changes its own registers, not the vCPU's, and is emulated as the
+	 * stores are.
+	 */
+	if ((info & VMX_DESC_INSN_LOAD) && !is_guest_mode(vcpu)) {
+		reg = vmx_get_exit_reason(vcpu).basic == EXIT_REASON_LDTR_TR ?
+		      KVM_X86_DESC_LDTR : KVM_X86_DESC_GDTR;
+		if (info & VMX_DESC_INSN_IDT_OR_TR)
+			reg++;
+		if (to_vmx(vcpu)->desc_load_exit & BIT(reg))
+			return handle_desc_load_exit(vcpu, info, reg);
+	}
+
 	return kvm_emulate_instruction(vcpu, 0);
 }
 
@@ -8803,6 +8934,8 @@ __init int vmx_hardware_setup(void)
 	kvm_caps.tsc_scaling_ratio_frac_bits = 48;
 	kvm_caps.has_bus_lock_exit = cpu_has_vmx_bus_lock_detection();
 	kvm_caps.has_notify_vmexit = cpu_has_notify_vmexit();
+	kvm_caps.supported_desc_load_exit = cpu_has_vmx_desc() ?
+					    KVM_X86_DESC_LOAD_EXIT_ALL : 0;
 
 	set_bit(0, vmx_vpid_bitmap); /* 0 is reserved for host */
 

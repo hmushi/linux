@@ -2468,6 +2468,9 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_X86_NOTIFY_VMEXIT:
 		r = kvm_caps.has_notify_vmexit;
 		break;
+	case KVM_CAP_X86_DESC_LOAD_EXIT:
+		r = kvm_caps.supported_desc_load_exit;
+		break;
 	case KVM_CAP_VM_TYPES:
 		r = kvm_caps.supported_vm_types;
 		break;
@@ -3424,8 +3427,9 @@ static int kvm_vcpu_ioctl_device_attr(struct kvm_vcpu *vcpu,
 }
 
 /*
- * Per-vCPU capabilities that configure the Hyper-V state of one plane vCPU.
- * The other capabilities belong to the plane 0 vCPU (shared state, nested).
+ * Per-vCPU capabilities that configure the state of one plane vCPU: its
+ * Hyper-V state and its descriptor-table load exits.  The other capabilities
+ * belong to the plane 0 vCPU (shared state, nested).
  */
 static bool kvm_plane_vcpu_cap(unsigned int cap)
 {
@@ -3437,6 +3441,8 @@ static bool kvm_plane_vcpu_cap(unsigned int cap)
 	case KVM_CAP_HYPERV_DIRECT_TLBFLUSH:
 		return true;
 #endif
+	case KVM_CAP_X86_DESC_LOAD_EXIT:
+		return true;
 	default:
 		return false;
 	}
@@ -3494,6 +3500,10 @@ static int kvm_vcpu_ioctl_enable_cap(struct kvm_vcpu *vcpu,
 	case KVM_CAP_ENFORCE_PV_FEATURE_CPUID:
 		vcpu->arch.pv_cpuid.enforce = cap->args[0];
 		return 0;
+	case KVM_CAP_X86_DESC_LOAD_EXIT:
+		if (cap->args[0] & ~kvm_caps.supported_desc_load_exit)
+			return -EINVAL;
+		return kvm_x86_call(set_desc_load_exit)(vcpu, cap->args[0]);
 	default:
 		return -EINVAL;
 	}

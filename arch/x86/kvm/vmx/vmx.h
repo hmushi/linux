@@ -208,6 +208,8 @@ struct vcpu_vmx {
 	struct vcpu_vt	      vt;
 	u8                    fail;
 	u8		      x2apic_msr_bitmap_mode;
+	/* KVM_CAP_X86_DESC_LOAD_EXIT: descriptor-table loads that exit */
+	u8		      desc_load_exit;
 
 	u32                   idt_vectoring_info;
 	ulong                 rflags;
