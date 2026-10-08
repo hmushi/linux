@@ -1248,6 +1248,24 @@ static bool hv_tsc_page_gfn(struct kvm_plane *plane, u64 *gfn)
 	return true;
 }
 
+/* Publish the current parameters to one page: struct first, then sequence. */
+static int hv_publish_tsc_page(struct kvm *kvm, u64 gfn)
+{
+	struct kvm_hv *hv = to_kvm_hv(kvm);
+	struct ms_hyperv_tsc_page page = hv->tsc_ref;
+
+	page.tsc_sequence = 0;
+	if (kvm_write_guest_unprotected(kvm, gfn_to_gpa(gfn), &page, sizeof(page)))
+		return -EFAULT;
+	/* The struct is complete before the sequence makes it valid. */
+	smp_wmb();
+	page.tsc_sequence = hv->tsc_ref.tsc_sequence;
+	if (kvm_write_guest_unprotected(kvm, gfn_to_gpa(gfn), &page,
+					sizeof(page.tsc_sequence)))
+		return -EFAULT;
+	return 0;
+}
+
 /* The lowest plane with an enabled page; it owns the sequence number. */
 static bool hv_first_tsc_page_gfn(struct kvm *kvm, u64 *gfn)
 {
@@ -1550,6 +1568,17 @@ static int kvm_hv_set_msr_pw(struct kvm_vcpu *vcpu, u32 msr, u64 data,
 	}
 	case HV_X64_MSR_REFERENCE_TSC: {
 		u64 gfn;
+
+		/* The parameters are valid already: publish them to this page only. */
+		if (!host && hv->hv_tsc_page_status == HV_TSC_PAGE_SET &&
+		    (data & HV_X64_MSR_TSC_REFERENCE_ENABLE)) {
+			/* The caller holds hv_lock. */
+			vcpu->plane->arch.hv_tsc_page = data;
+			gfn = data >> HV_X64_MSR_TSC_REFERENCE_ADDRESS_SHIFT;
+			if (hv_publish_tsc_page(kvm, gfn))
+				hv->hv_tsc_page_status = HV_TSC_PAGE_BROKEN;
+			break;
+		}
 
 		vcpu->plane->arch.hv_tsc_page = data;
 		/* Another plane's page may still be enabled: keep it updated. */
