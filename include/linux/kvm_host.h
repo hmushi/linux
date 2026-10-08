@@ -1540,6 +1540,8 @@ int kvm_write_guest(struct kvm *kvm, gpa_t gpa, const void *data,
 		    unsigned long len);
 int kvm_write_guest_unprotected(struct kvm *kvm, gpa_t gpa, const void *data,
 				unsigned long len);
+int kvm_read_guest_unprotected(struct kvm *kvm, gpa_t gpa, void *data,
+			       unsigned long len);
 int kvm_write_guest_cached(struct kvm *kvm, struct gfn_to_hva_cache *ghc,
 			   void *data, unsigned long len);
 int kvm_write_guest_offset_cached(struct kvm *kvm, struct gfn_to_hva_cache *ghc,
