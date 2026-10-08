@@ -4772,6 +4772,7 @@ void sev_vcpu_after_set_cpuid(struct vcpu_svm *svm)
 static void sev_es_init_vmcb(struct vcpu_svm *svm, bool init_event)
 {
 	struct kvm_sev_info *sev = to_kvm_sev_info(svm->vcpu.kvm);
+	struct kvm_sev_info_plane *sev_plane = to_kvm_sev_info_plane(svm->vcpu.plane);
 	struct vmcb *vmcb = svm->vmcb01.ptr;
 
 	svm->vmcb->control.misc_ctl |= SVM_MISC_ENABLE_SEV_ES;
