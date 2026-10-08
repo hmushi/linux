@@ -1301,6 +1301,7 @@ void kvm_hv_setup_tsc_page(struct kvm *kvm,
 			   struct pvclock_vcpu_time_info *hv_clock)
 {
 	struct kvm_hv *hv = to_kvm_hv(kvm);
+	struct ms_hyperv_tsc_page prev;
 	u32 tsc_seq;
 	u64 gfn;
 
@@ -1321,12 +1322,13 @@ void kvm_hv_setup_tsc_page(struct kvm *kvm,
 	 * Because the TSC parameters only vary when there is a
 	 * change in the master clock, do not bother with caching.
 	 */
-	if (unlikely(kvm_read_guest(kvm, gfn_to_gpa(gfn),
-				    &tsc_seq, sizeof(tsc_seq))))
+	if (unlikely(kvm_read_guest_unprotected(kvm, gfn_to_gpa(gfn), &tsc_seq,
+						sizeof(tsc_seq))))
 		goto out_err;
 
 	if (tsc_seq && tsc_page_update_unsafe(hv)) {
-		if (kvm_read_guest(kvm, gfn_to_gpa(gfn), &hv->tsc_ref, sizeof(hv->tsc_ref)))
+		if (kvm_read_guest_unprotected(kvm, gfn_to_gpa(gfn), &hv->tsc_ref,
+					       sizeof(hv->tsc_ref)))
 			goto out_err;
 
 		hv->hv_tsc_page_status = HV_TSC_PAGE_SET;
@@ -1335,19 +1337,22 @@ void kvm_hv_setup_tsc_page(struct kvm *kvm,
 
 	/*
 	 * While we're computing and writing the parameters, force the
-	 * guest to use the time reference count MSR.
+	 * guest to use the time reference count MSR.  Keep the previous
+	 * parameters: if this update fails they are still correct, and the
+	 * pages go back to them rather than staying invalid.
 	 */
+	prev = hv->tsc_ref;
 	hv->tsc_ref.tsc_sequence = 0;
 	if (hv_write_tsc_pages(kvm, sizeof(hv->tsc_ref.tsc_sequence)))
 		goto out_err;
 
 	if (!compute_tsc_page_parameters(hv_clock, &hv->tsc_ref))
-		goto out_err;
+		goto out_restore;
 
 	/* Ensure sequence is zero before writing the rest of the struct.  */
 	smp_wmb();
 	if (hv_write_tsc_pages(kvm, sizeof(hv->tsc_ref)))
-		goto out_err;
+		goto out_restore;
 
 	/*
 	 * Now switch to the TSC page mechanism by writing the sequence.
@@ -1366,6 +1371,15 @@ void kvm_hv_setup_tsc_page(struct kvm *kvm,
 	hv->hv_tsc_page_status = HV_TSC_PAGE_SET;
 	return;
 
+out_restore:
+	/* Restore the previous parameters; retry on the next clock update. */
+	if (prev.tsc_sequence) {
+		hv->tsc_ref = prev;
+		/* The zero sequence written above precedes the restore. */
+		smp_wmb();
+		if (!hv_write_tsc_pages(kvm, sizeof(hv->tsc_ref)))
+			return;
+	}
 out_err:
 	hv->hv_tsc_page_status = HV_TSC_PAGE_BROKEN;
 }

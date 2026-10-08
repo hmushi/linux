@@ -3818,6 +3818,30 @@ int kvm_write_guest_unprotected(struct kvm *kvm, gpa_t gpa, const void *data,
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_write_guest_unprotected);
 
+/* Read a page the hypervisor maintains for the guest; see kvm_write_guest_unprotected(). */
+int kvm_read_guest_unprotected(struct kvm *kvm, gpa_t gpa, void *data, unsigned long len)
+{
+	gfn_t gfn = gpa >> PAGE_SHIFT;
+	int seg;
+	int offset = offset_in_page(gpa);
+
+	while ((seg = next_segment(len, offset)) != 0) {
+		unsigned long addr;
+
+		addr = gfn_to_hva_many(gfn_to_memslot(kvm, gfn), gfn, NULL);
+		if (kvm_is_error_hva(addr))
+			return -EFAULT;
+		if (__copy_from_user(data, (void __user *)addr + offset, seg))
+			return -EFAULT;
+		offset = 0;
+		len -= seg;
+		data += seg;
+		++gfn;
+	}
+	return 0;
+}
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_read_guest_unprotected);
+
 int kvm_vcpu_write_guest(struct kvm_vcpu *vcpu, gpa_t gpa, const void *data,
 		         unsigned long len)
 {
