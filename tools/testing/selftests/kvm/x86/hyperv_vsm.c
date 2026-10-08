@@ -487,6 +487,151 @@ static void test_plane_tlb_flush(void)
 	ksft_test_result_pass("TLB flush from plane 1 targets plane 1\n");
 }
 
+#define SWITCH_RCX		0x1234ULL
+
+/* Runs on plane 0: the switch target sees the registers userspace wrote. */
+static void guest_plane0_switch_target(void)
+{
+	u64 rcx;
+
+	asm volatile("" : "=c" (rcx));
+	GUEST_ASSERT_EQ(rcx, SWITCH_RCX);
+	GUEST_SYNC(1);
+	GUEST_DONE();
+}
+
+/* Runs on plane 1: a VtlReturn leaves RAX as the hypercall page set it. */
+static void guest_plane1_vtl_return(gpa_t hcall_gpa)
+{
+	u64 rax;
+
+	guest_setup_hypercalls(hcall_gpa);
+	asm volatile("vmcall"
+		     : "=a" (rax)
+		     : "a" (VTL_CALL_RAX), "c" (HVCALL_VTL_RETURN)
+		     : "memory", "rdx", "r8", "r9", "r10", "r11");
+	GUEST_ASSERT_EQ(rax, VTL_CALL_RAX);
+	GUEST_SYNC(2);
+	GUEST_DONE();
+}
+
+static void vtl_switch_vm_create(struct kvm_vm **vmp, struct kvm_vcpu **vcpup,
+				 struct kvm_plane_vcpu **plane_vcpup)
+{
+	struct kvm_plane_vcpu *plane_vcpu;
+	struct kvm_plane *plane;
+	struct kvm_sregs sregs;
+	struct kvm_regs regs;
+	struct kvm_vcpu *vcpu;
+	struct kvm_vm *vm;
+	gva_t hcall_page;
+
+	kvm_force_split_irqchip = true;
+	vm = __vm_create(VM_SHAPE_DEFAULT, 1, 0);
+	kvm_force_split_irqchip = false;
+	vm_enable_cap(vm, KVM_CAP_PLANES_USERSPACE_SWITCH, 0);
+	vm_enable_cap(vm, KVM_CAP_HYPERV_VSM, 0);
+
+	vcpu = vm_vcpu_add(vm, 0, guest_plane0_switch_target);
+	vcpu_set_hv_cpuid(vcpu);
+	plane = vm_plane_add(vm, 1);
+	plane_vcpu = __vm_plane_vcpu_add(vcpu, plane);
+
+	vcpu_sregs_get(vcpu, &sregs);
+	plane_vcpu_ioctl(plane_vcpu, KVM_SET_SREGS, &sregs);
+	hcall_page = vm_alloc_page(vm);
+	vcpu_regs_get(vcpu, &regs);
+	regs.rip = (unsigned long)guest_plane1_vtl_return;
+	regs.rsp = vm_alloc_stack(vm, DEFAULT_STACK_PGS);
+	regs.rdi = addr_gva2gpa(vm, hcall_page);
+	plane_vcpu_ioctl(plane_vcpu, KVM_SET_REGS, &regs);
+
+	*vmp = vm;
+	*vcpup = vcpu;
+	*plane_vcpup = plane_vcpu;
+}
+
+static void expect_vtl_return_exit(struct kvm_vcpu *vcpu)
+{
+	vcpu->run->plane = 1;
+	vcpu_run(vcpu);
+	expect_hcall_exit(vcpu, KVM_EXIT_HYPERV_HCALL, HVCALL_VTL_RETURN);
+	TEST_ASSERT_EQ(vcpu->run->plane, 1);
+}
+
+/*
+ * After a VtlReturn exit the target plane cannot run until KVM_SET_REGS has
+ * written it; writing it first makes the same KVM_RUN succeed.
+ */
+static void test_vtl_switch_order(void)
+{
+	struct kvm_plane_vcpu *plane_vcpu;
+	struct kvm_vcpu *vcpu;
+	struct kvm_regs regs;
+	struct kvm_vm *vm;
+	int r;
+
+	TEST_REQUIRE(kvm_has_cap(KVM_CAP_PLANES_USERSPACE_SWITCH));
+
+	vtl_switch_vm_create(&vm, &vcpu, &plane_vcpu);
+	expect_vtl_return_exit(vcpu);
+
+	vcpu->run->plane = 0;
+	r = __vcpu_run(vcpu);
+	TEST_ASSERT(r == -1 && errno == EINVAL,
+		    "Target ran before its registers were written. ret: %d, errno: %d",
+		    r, errno);
+
+	vcpu_regs_get(vcpu, &regs);
+	regs.rcx = SWITCH_RCX;
+	vcpu_regs_set(vcpu, &regs);
+	vcpu->run->plane = 0;
+	vcpu_run(vcpu);
+	expect_sync(vcpu, 1);
+	TEST_ASSERT_EQ(vcpu->run->plane, 0);
+
+	kvm_vm_free(vm);
+	ksft_test_result_pass("VtlReturn target refused until KVM_SET_REGS\n");
+}
+
+/*
+ * The VtlReturn exit carries no result: the exiting plane keeps RAX as the
+ * hypercall page set it, and the registers written to the target before its
+ * KVM_RUN are what its first instruction reads.
+ */
+static void test_vtl_switch_registers(void)
+{
+	struct kvm_plane_vcpu *plane_vcpu;
+	struct kvm_vcpu *vcpu;
+	struct kvm_regs regs;
+	struct kvm_vm *vm;
+
+	TEST_REQUIRE(kvm_has_cap(KVM_CAP_PLANES_USERSPACE_SWITCH));
+
+	vtl_switch_vm_create(&vm, &vcpu, &plane_vcpu);
+	expect_vtl_return_exit(vcpu);
+
+	/* The exit does not reach RAX: the exiting plane still holds it. */
+	plane_vcpu_ioctl(plane_vcpu, KVM_GET_REGS, &regs);
+	TEST_ASSERT_EQ(regs.rax, VTL_CALL_RAX);
+
+	vcpu_regs_get(vcpu, &regs);
+	regs.rcx = SWITCH_RCX;
+	vcpu_regs_set(vcpu, &regs);
+	vcpu->run->plane = 0;
+	vcpu_run(vcpu);
+	expect_sync(vcpu, 1);
+
+	/* Back on plane 1 the hypercall completes with RAX untouched. */
+	vcpu->run->plane = 1;
+	vcpu_run(vcpu);
+	expect_sync(vcpu, 2);
+	TEST_ASSERT_EQ(vcpu->run->plane, 1);
+
+	kvm_vm_free(vm);
+	ksft_test_result_pass("VtlReturn keeps RAX, target reads the written registers\n");
+}
+
 #define AUTO_EOI_VECTOR		0x40
 #define AUTO_EOI_SPINS		BIT_ULL(28)
 #define EOI_MSR_VECTOR		0x60
@@ -721,7 +866,7 @@ int main(int argc, char *argv[])
 	TEST_REQUIRE(kvm_has_cap(KVM_CAP_HYPERV_VSM));
 
 	ksft_print_header();
-	ksft_set_plan(8);
+	ksft_set_plan(10);
 
 	test_cap_off();
 	test_cap_on();
@@ -734,11 +879,15 @@ int main(int argc, char *argv[])
 		test_plane_synic();
 		test_plane_tsc_page();
 		test_plane_tlb_flush();
+		test_vtl_switch_order();
+		test_vtl_switch_registers();
 		test_plane_auto_eoi();
 	} else {
 		ksft_test_result_skip("SINT route on plane 1 lands in plane 1\n");
 		ksft_test_result_skip("Plane 1 TSC page published, plane 0 page stays valid\n");
 		ksft_test_result_skip("TLB flush from plane 1 targets plane 1\n");
+		ksft_test_result_skip("VtlReturn target refused until KVM_SET_REGS\n");
+		ksft_test_result_skip("VtlReturn keeps RAX, target reads the written registers\n");
 		ksft_test_result_skip("Auto-EOI vector delivered to plane 1 without ISR\n");
 		ksft_test_result_skip("Auto-EOI mark does not inhibit APICv VM-wide\n");
 	}
