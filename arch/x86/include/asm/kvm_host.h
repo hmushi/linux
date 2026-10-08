@@ -895,6 +895,9 @@ struct kvm_vcpu_arch {
 	bool emulate_regs_need_sync_to_vcpu;
 	bool emulate_regs_need_sync_from_vcpu;
 	int (*complete_userspace_io)(struct kvm_vcpu *vcpu);
+
+	/* A plane switch named this plane; KVM_SET_REGS must land before it runs. */
+	bool switch_regs_stale;
 	unsigned long cui_linear_rip;
 	int cui_rdmsr_imm_reg;
 

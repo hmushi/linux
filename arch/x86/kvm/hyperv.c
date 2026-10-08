@@ -2671,6 +2671,24 @@ static int kvm_hv_hypercall_complete_userspace(struct kvm_vcpu *vcpu)
 }
 
 /*
+ * A VTL switch hands registers to the plane that runs next; userspace writes
+ * them before selecting it.  Mark the other planes until that write lands.
+ */
+static void kvm_hv_mark_vtl_switch_targets(struct kvm_vcpu *vcpu)
+{
+	struct kvm_vcpu_common *common = vcpu->common;
+	unsigned int i;
+
+	if (!vcpu->kvm->planes_userspace_switch)
+		return;
+
+	for (i = 0; i < KVM_MAX_PLANES; i++) {
+		if (common->vcpus[i] && common->vcpus[i] != vcpu)
+			common->vcpus[i]->arch.switch_regs_stale = true;
+	}
+}
+
+/*
  * HvCallVtlCall and HvCallVtlReturn have no result: the hypercall page
  * prologue moved RCX into RAX before the VMCALL and the hypervisor must
  * leave it there.  Userspace runs the other plane before this one resumes,
@@ -3054,12 +3072,14 @@ hypercall_userspace_exit:
 			xmm[reg].high = sse128_hi(hc.xmm[reg]);
 		}
 	}
-	if (hc.code == HVCALL_VTL_CALL || hc.code == HVCALL_VTL_RETURN)
+	if (hc.code == HVCALL_VTL_CALL || hc.code == HVCALL_VTL_RETURN) {
 		vcpu->arch.complete_userspace_io =
 			kvm_hv_hypercall_complete_vtl_switch;
-	else
+		kvm_hv_mark_vtl_switch_targets(vcpu);
+	} else {
 		vcpu->arch.complete_userspace_io =
 			kvm_hv_hypercall_complete_userspace;
+	}
 	return 0;
 }
 

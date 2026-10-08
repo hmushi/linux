@@ -9391,6 +9391,10 @@ static int kvm_select_plane_from_userspace(struct kvm_vcpu *vcpu_plane0)
 	if (plane >= KVM_MAX_PLANES || !common->vcpus[plane])
 		return -EINVAL;
 
+	/* Named by a switch exit and not yet written: refuse to run it. */
+	if (common->vcpus[plane]->arch.switch_regs_stale)
+		return -EINVAL;
+
 	for (i = 0; i < KVM_MAX_PLANES; i++) {
 		if (common->vcpus[i])
 			common->vcpus[i]->plane_state = i == plane ? RUNNABLE : STOPPED;

@@ -7050,8 +7050,12 @@ This field is ignored if KVM_CAP_IMMEDIATE_EXIT is not available.
 
 With KVM_CAP_PLANES_USERSPACE_SWITCH enabled, the plane whose vCPU KVM_RUN
 executes.  Read when KVM_RUN starts; a plane that does not exist for this vCPU
-fails with EINVAL.  On return it holds the plane that was running when KVM_RUN
-exited.  Ignored, and left at 0, when the capability is not enabled.
+fails with EINVAL.  So does a plane that another plane of the vCPU named in a
+HvCallVtlCall or HvCallVtlReturn exit until KVM_SET_REGS has written its
+registers: the switch hands registers to the plane that runs next, and a
+KVM_RUN that skips the write would run it with stale registers.  On return it
+holds the plane that was running when KVM_RUN exited.  Ignored, and left at
+0, when the capability is not enabled.
 
 ::
 
@@ -10156,6 +10160,8 @@ With the capability enabled:
    KVM_EXIT_PLANE_EVENT, with cause KVM_PLANE_EVENT_INTERRUPT for a higher
    plane and KVM_PLANE_EVENT_LOWER_INTERRUPT for a lower one.
  - a pending plane-0 event does not pre-empt a higher plane.
+ - after a KVM_EXIT_HYPERV for HvCallVtlCall or HvCallVtlReturn, the other
+   planes of the vCPU cannot run until KVM_SET_REGS has written them.
 
 The capability must be enabled before the first vCPU is created.  It does not
 change KVM_RUN on plane vCPU fds, which stays unsupported: all planes of a vCPU

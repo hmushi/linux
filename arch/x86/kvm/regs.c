@@ -140,6 +140,7 @@ int kvm_arch_vcpu_ioctl_set_regs(struct kvm_vcpu *vcpu, struct kvm_regs *regs)
 
 	vcpu_load(vcpu);
 	__set_regs(vcpu, regs);
+	vcpu->arch.switch_regs_stale = false;
 	vcpu_put(vcpu);
 	return 0;
 }
