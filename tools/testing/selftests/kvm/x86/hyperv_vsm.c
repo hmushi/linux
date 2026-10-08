@@ -251,6 +251,107 @@ static void enable_lapic(struct kvm_lapic_state *apic)
 	apic->regs[APIC_SPIV + 1] |= 1;
 }
 
+#define TSC_PAGE0_GPA		0x200000
+#define TSC_PAGE1_GPA		0x201000
+#define TSC_PAGE_ENABLE		BIT_ULL(0)
+
+/* The reference TSC page as the guest sees it. */
+struct tsc_page {
+	u32 tsc_sequence;
+	u32 reserved1;
+	u64 tsc_scale;
+	s64 tsc_offset;
+};
+
+static void guest_tsc_page(void)
+{
+	GUEST_SYNC(1);
+	GUEST_DONE();
+}
+
+static u32 tsc_page_sequence(struct kvm_vm *vm, gpa_t gpa)
+{
+	struct tsc_page *page = addr_gpa2hva(vm, gpa);
+
+	return READ_ONCE(page->tsc_sequence);
+}
+
+/*
+ * A plane that enables its reference TSC page while another plane's page is
+ * valid gets the current parameters; the other page stays valid.
+ */
+/* Runs on plane 1: enables its own reference TSC page, as a guest does. */
+static void guest_plane1_tsc_page(void)
+{
+	wrmsr(HV_X64_MSR_REFERENCE_TSC, TSC_PAGE1_GPA | TSC_PAGE_ENABLE);
+	GUEST_SYNC(1);
+	GUEST_DONE();
+}
+
+static void test_plane_tsc_page(void)
+{
+	struct kvm_plane_vcpu *plane_vcpu;
+	struct tsc_page *page0, *page1;
+	struct kvm_plane *plane;
+	struct kvm_sregs sregs;
+	struct kvm_regs regs;
+	struct kvm_vcpu *vcpu;
+	struct kvm_vm *vm;
+	struct ucall uc;
+
+	TEST_REQUIRE(kvm_has_cap(KVM_CAP_PLANES_USERSPACE_SWITCH));
+
+	/* planes need the split irqchip */
+	kvm_force_split_irqchip = true;
+	vm = __vm_create(VM_SHAPE_DEFAULT, 1, 0);
+	kvm_force_split_irqchip = false;
+	vm_enable_cap(vm, KVM_CAP_PLANES_USERSPACE_SWITCH, 0);
+	vcpu = vm_vcpu_add(vm, 0, guest_tsc_page);
+	vcpu_set_hv_cpuid(vcpu);
+	plane = vm_plane_add(vm, 1);
+	plane_vcpu = __vm_plane_vcpu_add(vcpu, plane);
+
+	vcpu_sregs_get(vcpu, &sregs);
+	plane_vcpu_ioctl(plane_vcpu, KVM_SET_SREGS, &sregs);
+	vcpu_regs_get(vcpu, &regs);
+	regs.rip = (unsigned long)guest_plane1_tsc_page;
+	regs.rsp = vm_alloc_stack(vm, DEFAULT_STACK_PGS);
+	plane_vcpu_ioctl(plane_vcpu, KVM_SET_REGS, &regs);
+
+	page0 = addr_gpa2hva(vm, TSC_PAGE0_GPA);
+	page1 = addr_gpa2hva(vm, TSC_PAGE1_GPA);
+	memset(page0, 0, sizeof(*page0));
+	memset(page1, 0, sizeof(*page1));
+
+	/* Plane 0 enables its page; running the vCPU publishes it. */
+	vcpu_set_msr(vcpu, HV_X64_MSR_REFERENCE_TSC,
+		     TSC_PAGE0_GPA | TSC_PAGE_ENABLE);
+	vcpu_run(vcpu);
+	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_SYNC);
+	TEST_ASSERT(tsc_page_sequence(vm, TSC_PAGE0_GPA),
+		    "plane 0's page is valid after the vCPU ran");
+
+	/*
+	 * Plane 1 enables its own page while plane 0's is valid.  The guest
+	 * write publishes the page before the vCPU runs on.
+	 */
+	vcpu->run->plane = 1;
+	vcpu_run(vcpu);
+	expect_sync(vcpu, 1);
+	TEST_ASSERT_EQ(vcpu->run->plane, 1);
+
+	TEST_ASSERT(tsc_page_sequence(vm, TSC_PAGE0_GPA),
+		    "plane 0's page stays valid");
+	TEST_ASSERT(tsc_page_sequence(vm, TSC_PAGE1_GPA),
+		    "plane 1's page becomes valid at once");
+	TEST_ASSERT_EQ(page0->tsc_scale, page1->tsc_scale);
+	TEST_ASSERT_EQ(page0->tsc_offset, page1->tsc_offset);
+	TEST_ASSERT_EQ(page0->tsc_sequence, page1->tsc_sequence);
+
+	kvm_vm_free(vm);
+	ksft_test_result_pass("Plane 1 TSC page published, plane 0 page stays valid\n");
+}
+
 /* A SINT route naming plane 1 interrupts plane 1's SynIC only. */
 static void test_plane_synic(void)
 {
@@ -620,7 +721,7 @@ int main(int argc, char *argv[])
 	TEST_REQUIRE(kvm_has_cap(KVM_CAP_HYPERV_VSM));
 
 	ksft_print_header();
-	ksft_set_plan(7);
+	ksft_set_plan(8);
 
 	test_cap_off();
 	test_cap_on();
@@ -631,10 +732,12 @@ int main(int argc, char *argv[])
 	kvm_vm_free(vm);
 	if (cap_planes > 1) {
 		test_plane_synic();
+		test_plane_tsc_page();
 		test_plane_tlb_flush();
 		test_plane_auto_eoi();
 	} else {
 		ksft_test_result_skip("SINT route on plane 1 lands in plane 1\n");
+		ksft_test_result_skip("Plane 1 TSC page published, plane 0 page stays valid\n");
 		ksft_test_result_skip("TLB flush from plane 1 targets plane 1\n");
 		ksft_test_result_skip("Auto-EOI vector delivered to plane 1 without ISR\n");
 		ksft_test_result_skip("Auto-EOI mark does not inhibit APICv VM-wide\n");
