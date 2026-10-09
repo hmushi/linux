@@ -6797,19 +6797,21 @@ restart:
 }
 
 /*
- * Fast invalidate all shadow pages and use lock-break technique
- * to zap obsolete pages.
- *
- * It's required when memslot is being deleted or VM is being
- * destroyed, in these cases, we should ensure that KVM MMU does
- * not use any resource of the being-deleted slot or all slots
- * after calling the function.
+ * The "front half" of a fast invalidation: mark all shadow pages obsolete
+ * and request that all vCPUs drop their soon-to-be invalid roots.  Runs
+ * with mmu_lock held for write; the obsolete pages are zapped afterwards
+ * by __kvm_mmu_zap_all_fast_back_half(), which must be called with
+ * mmu_lock NOT held.
  */
-static void kvm_mmu_zap_all_fast(struct kvm *kvm)
+static void __kvm_mmu_zap_all_fast_front_half(struct kvm *kvm)
 {
+	/*
+	 * The mmu_valid_gen toggle below relies on slots_lock being held
+	 * across both halves of the zap.
+	 */
 	lockdep_assert_held(&kvm->slots_lock);
+	lockdep_assert_held_write(&kvm->mmu_lock);
 
-	write_lock(&kvm->mmu_lock);
 	trace_kvm_mmu_zap_all_fast(kvm);
 
 	/*
@@ -6844,9 +6846,17 @@ static void kvm_mmu_zap_all_fast(struct kvm *kvm)
 	 * otherwise, vcpu would purge shadow page but miss tlb flush.
 	 */
 	kvm_make_all_cpus_request(kvm, KVM_REQ_MMU_FREE_OBSOLETE_ROOTS);
+}
 
+/*
+ * The "back half" of a fast invalidation: zap the obsolete pages marked by
+ * __kvm_mmu_zap_all_fast_front_half().  Cheap when there is nothing to
+ * zap.  Takes mmu_lock itself, with lock-breaks while zapping.
+ */
+static void __kvm_mmu_zap_all_fast_back_half(struct kvm *kvm)
+{
+	write_lock(&kvm->mmu_lock);
 	kvm_zap_obsolete_pages(kvm);
-
 	write_unlock(&kvm->mmu_lock);
 
 	/*
@@ -6859,6 +6869,26 @@ static void kvm_mmu_zap_all_fast(struct kvm *kvm)
 	 */
 	if (tdp_mmu_enabled)
 		kvm_tdp_mmu_zap_invalidated_roots(kvm, true);
+}
+
+/*
+ * Fast invalidate all shadow pages and use lock-break technique
+ * to zap obsolete pages.
+ *
+ * It's required when memslot is being deleted or VM is being
+ * destroyed, in these cases, we should ensure that KVM MMU does
+ * not use any resource of the being-deleted slot or all slots
+ * after calling the function.
+ */
+static void kvm_mmu_zap_all_fast(struct kvm *kvm)
+{
+	lockdep_assert_held(&kvm->slots_lock);
+
+	write_lock(&kvm->mmu_lock);
+	__kvm_mmu_zap_all_fast_front_half(kvm);
+	write_unlock(&kvm->mmu_lock);
+
+	__kvm_mmu_zap_all_fast_back_half(kvm);
 }
 
 int kvm_mmu_init_vm(struct kvm *kvm)
