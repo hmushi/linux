@@ -18,6 +18,7 @@
 #include <linux/sched.h>
 #include <linux/trace_events.h>
 #include <linux/slab.h>
+#include <linux/unaligned.h>
 #include <linux/hashtable.h>
 #include <linux/objtool.h>
 #include <linux/psp-sev.h>
@@ -3344,6 +3345,165 @@ static int vmmcall_interception(struct kvm_vcpu *vcpu)
 	return kvm_emulate_hypercall(vcpu);
 }
 
+/*
+ * Keep the descriptor-table load intercepts on while userspace wants load
+ * exits.  SVM owns the load bits alone; UMIP emulation uses the store bits.
+ */
+static int svm_set_desc_load_exit(struct kvm_vcpu *vcpu, u8 mask)
+{
+	struct vcpu_svm *svm = to_svm(vcpu);
+	static const int bits[] = {
+		[KVM_X86_DESC_GDTR] = INTERCEPT_LOAD_GDTR,
+		[KVM_X86_DESC_IDTR] = INTERCEPT_LOAD_IDTR,
+		[KVM_X86_DESC_LDTR] = INTERCEPT_LOAD_LDTR,
+		[KVM_X86_DESC_TR]   = INTERCEPT_LOAD_TR,
+	};
+	int reg;
+
+	svm->desc_load_exit = mask;
+	for (reg = KVM_X86_DESC_GDTR; reg <= KVM_X86_DESC_TR; reg++) {
+		if (mask & BIT(reg))
+			svm_set_intercept(svm, bits[reg]);
+		else
+			svm_clr_intercept(svm, bits[reg]);
+	}
+	return 0;
+}
+
+/*
+ * Report a descriptor-table load to userspace instead of executing it.  SVM
+ * has no equivalent of the VM-exit instruction information, so the operand
+ * comes from the emulator's decode; the length comes from next_rip.  The
+ * checks the hardware makes come first, as on VMX, so that an exit means the
+ * load would have completed.
+ */
+static int svm_handle_desc_load(struct kvm_vcpu *vcpu, int reg)
+{
+	struct vcpu_svm *svm = to_svm(vcpu);
+	struct kvm_run *run = vcpu->run;
+	struct x86_emulate_ctxt *ctxt;
+	u64 what = reg, base = 0, operand = 0;
+	struct x86_exception e;
+	struct kvm_segment seg;
+	u16 limit_or_sel = 0;
+	u8 buf[10] = {};
+	unsigned long rip;
+	gva_t gva;
+	int len;
+
+	if (reg >= KVM_X86_DESC_LDTR &&
+	    (!is_protmode(vcpu) || (kvm_get_rflags(vcpu) & X86_EFLAGS_VM))) {
+		kvm_queue_exception(vcpu, UD_VECTOR);
+		return 1;
+	}
+
+	if (svm_get_cpl(vcpu)) {
+		kvm_queue_exception_e(vcpu, GP_VECTOR, 0);
+		return 1;
+	}
+
+	if (x86_decode_emulated_instruction(vcpu, 0, NULL, 0) != EMULATION_OK)
+		return kvm_emulate_instruction(vcpu, 0);
+	ctxt = vcpu->arch.emulate_ctxt;
+
+	if (reg >= KVM_X86_DESC_LDTR && ctxt->modrm_mod == 3) {
+		operand = ctxt->modrm_rm;
+		limit_or_sel = kvm_register_read(vcpu, operand);
+		goto report;
+	}
+
+	if (reg >= KVM_X86_DESC_LDTR)
+		len = 2;
+	else if (is_64_bit_mode(vcpu))
+		len = 10;
+	else
+		len = ctxt->op_bytes == 2 ? 5 : 6;
+
+	/*
+	 * memop holds the effective address; the segment base is not folded in.
+	 */
+	svm_get_segment(vcpu, &seg, ctxt->memop.addr.mem.seg);
+	gva = ctxt->memop.addr.mem.ea;
+	if (!is_64_bit_mode(vcpu)) {
+		if (seg.unusable || gva > seg.limit || gva + len - 1 > seg.limit) {
+			kvm_queue_exception_e(vcpu,
+					      ctxt->memop.addr.mem.seg == VCPU_SREG_SS ?
+					      SS_VECTOR : GP_VECTOR, 0);
+			return 1;
+		}
+		gva = (u32)(seg.base + gva);
+	} else if (ctxt->memop.addr.mem.seg == VCPU_SREG_FS ||
+		   ctxt->memop.addr.mem.seg == VCPU_SREG_GS) {
+		gva += seg.base;
+	}
+
+	if (kvm_read_guest_virt(vcpu, gva, buf, len, &e)) {
+		kvm_inject_emulated_page_fault(vcpu, &e);
+		return 1;
+	}
+
+	limit_or_sel = get_unaligned_le16(buf);
+	if (reg < KVM_X86_DESC_LDTR) {
+		if (len == 10) {
+			base = get_unaligned_le64(&buf[2]);
+			if (is_noncanonical_base_address(base, vcpu)) {
+				kvm_queue_exception_e(vcpu, GP_VECTOR, 0);
+				return 1;
+			}
+		} else if (len == 6) {
+			base = get_unaligned_le32(&buf[2]);
+		} else {
+			base = buf[2] | ((u32)buf[3] << 8) | ((u32)buf[4] << 16);
+		}
+	}
+	operand = gva;
+	what |= KVM_DESC_LOAD_IS_MEMORY_OP;
+
+report:
+	rip = kvm_rip_read(vcpu);
+	if (svm->vmcb->control.next_rip > rip)
+		what |= (u64)(svm->vmcb->control.next_rip - rip) <<
+			KVM_DESC_LOAD_INSN_LEN_SHIFT;
+
+	run->exit_reason = KVM_EXIT_PLANE_EVENT;
+	memset(&run->plane_event, 0, sizeof(run->plane_event));
+	run->plane_event.cause = KVM_PLANE_EVENT_DESC_LOAD;
+	run->plane_event.plane = vcpu->plane_level;
+	run->plane_event.extra[0] = what;
+	run->plane_event.extra[1] = operand;
+	run->plane_event.extra[2] = limit_or_sel;
+	run->plane_event.extra[3] = base;
+	return 0;
+}
+
+static int svm_desc_load_interception(struct kvm_vcpu *vcpu, int reg)
+{
+	if (to_svm(vcpu)->desc_load_exit & BIT(reg))
+		return svm_handle_desc_load(vcpu, reg);
+
+	return kvm_emulate_instruction(vcpu, 0);
+}
+
+static int gdtr_write_interception(struct kvm_vcpu *vcpu)
+{
+	return svm_desc_load_interception(vcpu, KVM_X86_DESC_GDTR);
+}
+
+static int idtr_write_interception(struct kvm_vcpu *vcpu)
+{
+	return svm_desc_load_interception(vcpu, KVM_X86_DESC_IDTR);
+}
+
+static int ldtr_write_interception(struct kvm_vcpu *vcpu)
+{
+	return svm_desc_load_interception(vcpu, KVM_X86_DESC_LDTR);
+}
+
+static int tr_write_interception(struct kvm_vcpu *vcpu)
+{
+	return svm_desc_load_interception(vcpu, KVM_X86_DESC_TR);
+}
+
 static int (*const svm_exit_handlers[])(struct kvm_vcpu *vcpu) = {
 	[SVM_EXIT_READ_CR0]			= cr_interception,
 	[SVM_EXIT_READ_CR3]			= cr_interception,
@@ -3393,6 +3553,10 @@ static int (*const svm_exit_handlers[])(struct kvm_vcpu *vcpu) = {
 	[SVM_EXIT_MSR]				= msr_interception,
 	[SVM_EXIT_TASK_SWITCH]			= task_switch_interception,
 	[SVM_EXIT_SHUTDOWN]			= shutdown_interception,
+	[SVM_EXIT_GDTR_WRITE]			= gdtr_write_interception,
+	[SVM_EXIT_IDTR_WRITE]			= idtr_write_interception,
+	[SVM_EXIT_LDTR_WRITE]			= ldtr_write_interception,
+	[SVM_EXIT_TR_WRITE]			= tr_write_interception,
 	[SVM_EXIT_VMRUN]			= vmrun_interception,
 	[SVM_EXIT_VMMCALL]			= vmmcall_interception,
 	[SVM_EXIT_VMLOAD]			= vmload_interception,
@@ -5408,6 +5572,7 @@ struct kvm_x86_ops svm_x86_ops __initdata = {
 	.get_rflags = svm_get_rflags,
 	.set_rflags = svm_set_rflags,
 	.get_if_flag = svm_get_if_flag,
+	.set_desc_load_exit = svm_set_desc_load_exit,
 
 	.flush_tlb_all = svm_flush_tlb_all,
 	.flush_tlb_current = svm_flush_tlb_current,
@@ -5722,6 +5887,11 @@ static __init int svm_hardware_setup(void)
 	svm_adjust_mmio_mask();
 
 	nrips = nrips && boot_cpu_has(X86_FEATURE_NRIPS);
+
+	/* The load exits need next_rip for the instruction length. */
+	kvm_caps.supported_desc_load_exit = nrips ? KVM_X86_DESC_LOAD_EXIT_GDTR |
+		KVM_X86_DESC_LOAD_EXIT_IDTR | KVM_X86_DESC_LOAD_EXIT_LDTR |
+		KVM_X86_DESC_LOAD_EXIT_TR : 0;
 
 	if (lbrv) {
 		if (!boot_cpu_has(X86_FEATURE_LBRV))

@@ -288,6 +288,8 @@ struct vcpu_sev_es_state {
 
 struct vcpu_svm {
 	struct kvm_vcpu vcpu;
+	/* KVM_CAP_X86_DESC_LOAD_EXIT: descriptor-table loads that exit */
+	u8 desc_load_exit;
 	/* vmcb always points at current_vmcb->ptr, it's purely a shorthand. */
 	struct vmcb *vmcb;
 	struct kvm_vmcb_info vmcb01;
