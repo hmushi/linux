@@ -1246,6 +1246,28 @@ static inline unsigned long kvm_plane_access_attrs(struct kvm_plane *plane,
 	return xa_to_value(xa_load(&plane->access_attr_array, gfn));
 }
 
+/*
+ * True if every gfn in [@start, @end) has the same access attributes in
+ * @plane, including none at all: a mapping may span the range only then.
+ */
+static inline bool kvm_plane_range_has_uniform_attrs(struct kvm_plane *plane,
+						     gfn_t start, gfn_t end)
+{
+	unsigned long first, index, nr = 0;
+	void *entry;
+
+	if (likely(!kvm_plane_has_access_attrs(plane)))
+		return true;
+
+	first = kvm_plane_access_attrs(plane, start);
+	xa_for_each_range(&plane->access_attr_array, index, entry, start, end - 1) {
+		if (xa_to_value(entry) != first)
+			return false;
+		nr++;
+	}
+	return first ? nr == end - start : nr == 0;
+}
+
 /* Called under kvm->slots_lock after [start, end) changed in @plane. */
 void kvm_arch_plane_access_attrs_changed(struct kvm_plane *plane,
 					 gfn_t start, gfn_t end);

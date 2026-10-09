@@ -369,7 +369,8 @@ static inline void kvm_mmu_prepare_memory_fault_exit(struct kvm_vcpu *vcpu,
 		vcpu->run->memory_fault.flags |= KVM_MEMORY_EXIT_FLAG_PLANE;
 }
 
-int kvm_mmu_max_mapping_level(struct kvm *kvm, struct kvm_page_fault *fault,
+int kvm_mmu_max_mapping_level(struct kvm *kvm, struct kvm_plane *plane,
+			      struct kvm_page_fault *fault,
 			      const struct kvm_memory_slot *slot, gfn_t gfn);
 void kvm_mmu_hugepage_adjust(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault);
 void disallowed_hugepage_adjust(struct kvm_page_fault *fault, u64 spte, int cur_level);

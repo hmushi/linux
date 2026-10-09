@@ -1796,7 +1796,8 @@ retry:
 		if (iter.gfn < start || iter.gfn >= end)
 			continue;
 
-		max_mapping_level = kvm_mmu_max_mapping_level(kvm, NULL, slot, iter.gfn);
+		max_mapping_level = kvm_mmu_max_mapping_level(kvm, kvm->planes[root->role.plane],
+							      NULL, slot, iter.gfn);
 		if (max_mapping_level < iter.level)
 			continue;
 

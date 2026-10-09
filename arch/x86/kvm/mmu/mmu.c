@@ -3410,7 +3410,21 @@ static u8 kvm_gmem_max_mapping_level(struct kvm *kvm, struct kvm_page_fault *fau
 	return max_level;
 }
 
-int kvm_mmu_max_mapping_level(struct kvm *kvm, struct kvm_page_fault *fault,
+/*
+ * A plane's access attributes are per gfn and shape only that plane's
+ * mappings; a leaf may cover a range only where they do not differ.
+ */
+static bool plane_hugepage_attrs_uniform(struct kvm_plane *plane, gfn_t gfn,
+					 int level)
+{
+	gfn_t start = gfn_round_for_level(gfn, level);
+
+	return kvm_plane_range_has_uniform_attrs(plane, start,
+						 start + KVM_PAGES_PER_HPAGE(level));
+}
+
+int kvm_mmu_max_mapping_level(struct kvm *kvm, struct kvm_plane *plane,
+			      struct kvm_page_fault *fault,
 			      const struct kvm_memory_slot *slot, gfn_t gfn)
 {
 	struct kvm_lpage_info *linfo;
@@ -3430,7 +3444,8 @@ int kvm_mmu_max_mapping_level(struct kvm *kvm, struct kvm_page_fault *fault,
 	max_level = min(max_level, max_huge_page_level);
 	for ( ; max_level > PG_LEVEL_4K; max_level--) {
 		linfo = lpage_info_slot(gfn, slot, max_level);
-		if (!linfo->disallow_lpage)
+		if (!linfo->disallow_lpage &&
+		    plane_hugepage_attrs_uniform(plane, gfn, max_level))
 			break;
 	}
 
@@ -3465,7 +3480,7 @@ void kvm_mmu_hugepage_adjust(struct kvm_vcpu *vcpu, struct kvm_page_fault *fault
 	 * Enforce the iTLB multihit workaround after capturing the requested
 	 * level, which will be used to do precise, accurate accounting.
 	 */
-	fault->req_level = kvm_mmu_max_mapping_level(vcpu->kvm, fault,
+	fault->req_level = kvm_mmu_max_mapping_level(vcpu->kvm, vcpu->plane, fault,
 						     fault->slot, fault->gfn);
 	if (fault->req_level == PG_LEVEL_4K || fault->huge_page_disallowed)
 		return;
@@ -4677,6 +4692,11 @@ static int kvm_faultin_memory_protections(struct kvm_vcpu *vcpu,
 	if (unlikely(!fault->slot))
 		return RET_PF_CONTINUE;
 
+	/*
+	 * One gfn speaks for the whole leaf: kvm_mmu_max_mapping_level()
+	 * refuses a level over gfns whose plane attributes differ, so the
+	 * attributes of fault->gfn are those of every gfn the mapping covers.
+	 */
 	access = kvm_get_gfn_protections(vcpu, fault->gfn);
 	if (access == ACC_ALL)
 		return RET_PF_CONTINUE;
@@ -7544,7 +7564,8 @@ restart:
 		 * pages are never collapsible.
 		 */
 		if (sp->role.direct && is_gfn_in_memslot(slot, sp->gfn) &&
-		    sp->role.level < kvm_mmu_max_mapping_level(kvm, NULL, slot, sp->gfn)) {
+		    sp->role.level < kvm_mmu_max_mapping_level(kvm, kvm->planes[sp->role.plane],
+							       NULL, slot, sp->gfn)) {
 			kvm_zap_one_rmap_spte(kvm, rmap_head, sptep);
 
 			if (kvm_available_flush_remote_tlbs_range())
