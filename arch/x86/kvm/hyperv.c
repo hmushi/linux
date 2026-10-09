@@ -2777,12 +2777,15 @@ int kvm_hv_hypercall(struct kvm_vcpu *vcpu)
 		return kvm_hv_hypercall_userspace_exit(vcpu, &hc);
 	}
 	case HV_EXT_CALL_QUERY_CAPABILITIES ... HV_EXT_CALL_MAX:
-		if (unlikely(hc.fast)) {
+		if (unlikely(hc.fast) &&
+		    !to_kvm_hv(vcpu->kvm)->hv_forward_hcalls) {
 			ret = HV_STATUS_INVALID_PARAMETER;
 			break;
 		}
 		return kvm_hv_hypercall_userspace_exit(vcpu, &hc);
 	default:
+		if (to_kvm_hv(vcpu->kvm)->hv_forward_hcalls)
+			return kvm_hv_hypercall_userspace_exit(vcpu, &hc);
 		ret = HV_STATUS_INVALID_HYPERCALL_CODE;
 		break;
 	}
