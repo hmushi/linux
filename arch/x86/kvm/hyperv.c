@@ -2657,6 +2657,18 @@ static void kvm_hv_write_xmm(struct kvm_hyperv_xmm_reg *xmm)
 	kvm_fpu_put();
 }
 
+/*
+ * A hypercall that exited to userspace is completed on the next KVM_RUN.
+ * Userspace may have moved the vCPU in between: a VTL switch returns the VP
+ * to the RIP its secure kernel chose, not to the instruction after the
+ * VMCALL. Skipping an instruction there would land on whatever follows the
+ * new RIP, so only skip when the vCPU is still at the exit RIP.
+ */
+static bool kvm_hv_hypercall_moved(struct kvm_vcpu *vcpu)
+{
+	return kvm_rip_read(vcpu) != to_hv_vcpu(vcpu)->hcall_exit_rip;
+}
+
 static int kvm_hv_hypercall_complete_userspace(struct kvm_vcpu *vcpu)
 {
 	struct kvm_hyperv_exit *exit = &vcpu->run->hyperv;
@@ -2666,6 +2678,13 @@ static int kvm_hv_hypercall_complete_userspace(struct kvm_vcpu *vcpu)
 	if (exit->type == KVM_EXIT_HYPERV_HCALL_XMM &&
 	    hv_result_success(result) && is_xmm_output_hypercall(code))
 		kvm_hv_write_xmm(exit->u.hcall.xmm);
+
+	if (kvm_hv_hypercall_moved(vcpu)) {
+		trace_kvm_hv_hypercall_done(result);
+		kvm_hv_hypercall_set_result(vcpu, result);
+		++vcpu->stat.hypercalls;
+		return 1;
+	}
 
 	return kvm_hv_hypercall_complete(vcpu, result);
 }
@@ -2701,6 +2720,9 @@ static int kvm_hv_hypercall_complete_vtl_switch(struct kvm_vcpu *vcpu)
 
 	trace_kvm_hv_hypercall_done(HV_STATUS_SUCCESS);
 	++vcpu->stat.hypercalls;
+
+	if (kvm_hv_hypercall_moved(vcpu))
+		return 1;
 
 	return kvm_skip_emulated_instruction(vcpu);
 }
@@ -3055,6 +3077,7 @@ hypercall_complete:
 	return kvm_hv_hypercall_complete(vcpu, ret);
 
 hypercall_userspace_exit:
+	hv_vcpu->hcall_exit_rip = kvm_rip_read(vcpu);
 	vcpu->run->exit_reason = KVM_EXIT_HYPERV;
 	vcpu->run->hyperv.type = KVM_EXIT_HYPERV_HCALL;
 	vcpu->run->hyperv.u.hcall.input = hc.param;

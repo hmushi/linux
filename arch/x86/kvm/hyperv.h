@@ -121,6 +121,9 @@ struct kvm_vcpu_hv {
 	bool suspended;
 	int waiting_on;
 
+	/* RIP of the hypercall instruction whose userspace exit is pending */
+	u64 hcall_exit_rip;
+
 	int tlb_flush_inhibit;
 };
 
