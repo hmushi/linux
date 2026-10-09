@@ -2885,12 +2885,6 @@ out_unlock:
 	return r;
 }
 
-bool __weak kvm_arch_mem_attributes_supported_prot(struct kvm *kvm, unsigned long attrs)
-{
-	WARN_ON_ONCE("KVM_MEMORY_ATTRIBUTE_PROT requires kvm_arch_mem_attributes_supported_prot()");
-	return false;
-}
-
 bool kvm_mem_attributes_valid(struct kvm *kvm, unsigned long attrs)
 {
 	if (attrs & ~kvm_supported_mem_attributes(kvm))
@@ -2901,6 +2895,40 @@ bool kvm_mem_attributes_valid(struct kvm *kvm, unsigned long attrs)
 		return false;
 
 	return true;
+}
+
+static int kvm_vm_ioctl_set_mem_attributes(struct kvm *kvm,
+					   struct kvm_memory_attributes *attrs)
+{
+	gfn_t start, end;
+
+	/* flags is currently not used. */
+	if (attrs->flags)
+		return -EINVAL;
+	if (!kvm_mem_attributes_valid(kvm, attrs->attributes))
+		return -EINVAL;
+	if (attrs->size == 0 || attrs->address + attrs->size < attrs->address)
+		return -EINVAL;
+	if (!PAGE_ALIGNED(attrs->address) || !PAGE_ALIGNED(attrs->size))
+		return -EINVAL;
+
+	start = attrs->address >> PAGE_SHIFT;
+	end = (attrs->address + attrs->size) >> PAGE_SHIFT;
+
+	/*
+	 * xarray tracks data using "unsigned long", and as a result so does
+	 * KVM.  For simplicity, supports generic attributes only on 64-bit
+	 * architectures.
+	 */
+	BUILD_BUG_ON(sizeof(attrs->attributes) != sizeof(unsigned long));
+
+	return kvm_vm_set_mem_attributes(kvm, start, end, attrs->attributes);
+}
+#endif /* CONFIG_KVM_GENERIC_MEMORY_ATTRIBUTES */
+
+bool __weak kvm_arch_mem_attributes_supported_prot(struct kvm *kvm, unsigned long attrs)
+{
+	return false;
 }
 
 void __weak kvm_arch_plane_access_attrs_changed(struct kvm_plane *plane,
@@ -2977,7 +3005,7 @@ static int kvm_vm_ioctl_set_plane_mem_attributes(struct kvm *kvm,
 		return -EINVAL;
 	if (attrs->attributes & ~KVM_MEMORY_ATTRIBUTE_PROT)
 		return -EINVAL;
-	if (!kvm_mem_attributes_valid(kvm, attrs->attributes))
+	if (!kvm_arch_mem_attributes_supported_prot(kvm, attrs->attributes))
 		return -EINVAL;
 	if (attrs->size == 0 || attrs->address + attrs->size < attrs->address)
 		return -EINVAL;
@@ -2997,35 +3025,6 @@ static int kvm_vm_ioctl_set_plane_mem_attributes(struct kvm *kvm,
 
 	return kvm_plane_set_access_attrs(plane, start, end, attrs->attributes);
 }
-
-static int kvm_vm_ioctl_set_mem_attributes(struct kvm *kvm,
-					   struct kvm_memory_attributes *attrs)
-{
-	gfn_t start, end;
-
-	/* flags is currently not used. */
-	if (attrs->flags)
-		return -EINVAL;
-	if (!kvm_mem_attributes_valid(kvm, attrs->attributes))
-		return -EINVAL;
-	if (attrs->size == 0 || attrs->address + attrs->size < attrs->address)
-		return -EINVAL;
-	if (!PAGE_ALIGNED(attrs->address) || !PAGE_ALIGNED(attrs->size))
-		return -EINVAL;
-
-	start = attrs->address >> PAGE_SHIFT;
-	end = (attrs->address + attrs->size) >> PAGE_SHIFT;
-
-	/*
-	 * xarray tracks data using "unsigned long", and as a result so does
-	 * KVM.  For simplicity, supports generic attributes only on 64-bit
-	 * architectures.
-	 */
-	BUILD_BUG_ON(sizeof(attrs->attributes) != sizeof(unsigned long));
-
-	return kvm_vm_set_mem_attributes(kvm, start, end, attrs->attributes);
-}
-#endif /* CONFIG_KVM_GENERIC_MEMORY_ATTRIBUTES */
 
 struct kvm_memory_slot *gfn_to_memslot(struct kvm *kvm, gfn_t gfn)
 {
@@ -6157,6 +6156,7 @@ static long kvm_vm_ioctl(struct file *filp,
 		r = kvm_vm_ioctl_set_mem_attributes(kvm, &attrs);
 		break;
 	}
+#endif /* CONFIG_KVM_GENERIC_MEMORY_ATTRIBUTES */
 	case KVM_SET_PLANE_MEMORY_ATTRIBUTES: {
 		struct kvm_plane_memory_attributes attrs;
 
@@ -6167,7 +6167,6 @@ static long kvm_vm_ioctl(struct file *filp,
 		r = kvm_vm_ioctl_set_plane_mem_attributes(kvm, &attrs);
 		break;
 	}
-#endif /* CONFIG_KVM_GENERIC_MEMORY_ATTRIBUTES */
 	case KVM_CREATE_DEVICE: {
 		struct kvm_create_device cd;
 

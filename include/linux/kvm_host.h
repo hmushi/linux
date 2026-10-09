@@ -841,9 +841,7 @@ static inline int kvm_arch_vcpu_memslots_id(struct kvm_vcpu *vcpu)
 }
 #endif
 
-#ifdef CONFIG_KVM_GENERIC_MEMORY_ATTRIBUTES
-bool kvm_arch_mem_attributes_supported_prot(struct kvm *kvm, unsigned long attrs);
-#else
+#ifndef CONFIG_KVM_GENERIC_MEMORY_ATTRIBUTES
 static inline bool kvm_arch_has_private_mem(struct kvm *kvm)
 {
 	return false;
@@ -2847,10 +2845,16 @@ static inline bool kvm_check_gen(struct kvm *kvm, u64 slots_generation,
 	return kvm_memslots_check_gen(kvm, slots_generation, attrs_generation, &slots);
 }
 
-#ifdef CONFIG_KVM_GENERIC_MEMORY_ATTRIBUTES
 #define KVM_MEMORY_ATTRIBUTE_PROT \
 	(KVM_MEMORY_ATTRIBUTE_NR | KVM_MEMORY_ATTRIBUTE_NW | KVM_MEMORY_ATTRIBUTE_NX)
 
+/*
+ * Plane access attributes need no VM-wide attribute support: the plane
+ * carries them and the architecture decides which protections it honours.
+ */
+bool kvm_arch_mem_attributes_supported_prot(struct kvm *kvm, unsigned long attrs);
+
+#ifdef CONFIG_KVM_GENERIC_MEMORY_ATTRIBUTES
 #define KVM_MEMORY_ATTRIBUTE_NEEDS_SYNC_MASK KVM_MEMORY_ATTRIBUTE_PROT
 
 static inline unsigned long kvm_get_memory_attributes(struct kvm *kvm, gfn_t gfn)
