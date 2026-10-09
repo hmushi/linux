@@ -1442,6 +1442,7 @@ struct kvm_arch {
 	unsigned int indirect_shadow_pages;
 	u8 mmu_valid_gen;
 	u8 vm_type;
+	unsigned int user_max_planes;
 	bool has_private_mem;
 	bool has_protected_state;
 	bool has_protected_eoi;
