@@ -2932,15 +2932,33 @@ static int kvm_plane_set_access_attrs(struct kvm_plane *plane, gfn_t start,
 		}
 	}
 
+	/*
+	 * A fault on a vCPU of this plane reads the attributes without a
+	 * lock.  Hold the range invalidated from before the store until
+	 * after the existing mappings are gone, so that a fault in flight
+	 * retries instead of installing a mapping from the old attributes
+	 * or rewriting a live one from the new, as the VM-wide attribute
+	 * path does.
+	 */
+	KVM_MMU_LOCK(kvm);
+	kvm_mmu_invalidate_start(kvm);
+	kvm_mmu_invalidate_range_add(kvm, start, end);
+	KVM_MMU_UNLOCK(kvm);
+
 	for (gfn = start; gfn < end; gfn++) {
 		r = xa_err(xa_store(&plane->access_attr_array, gfn, entry,
 				    GFP_KERNEL_ACCOUNT));
 		if (KVM_BUG_ON(r, kvm))
-			goto out_unlock;
+			break;
 		cond_resched();
 	}
 
-	kvm_arch_plane_access_attrs_changed(plane, start, end);
+	if (!r)
+		kvm_arch_plane_access_attrs_changed(plane, start, end);
+
+	KVM_MMU_LOCK(kvm);
+	kvm_mmu_invalidate_end(kvm);
+	KVM_MMU_UNLOCK(kvm);
 
 out_unlock:
 	mutex_unlock(&kvm->slots_lock);
