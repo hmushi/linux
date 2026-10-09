@@ -668,6 +668,98 @@ static void test_plane_cpuid_runtime(void)
 	ksft_test_result_pass("CPUID runtime bits follow the executing plane\n");
 }
 
+/*
+ * A plane's access attributes size that plane's mappings: a 2 MiB-aligned
+ * region backed by a hugepage, with alternating attributes on its 4 KiB
+ * pages, must not be mapped by one leaf carrying one page's permissions.
+ */
+#define MIXED_GPA	0x40000000ul
+#define MIXED_SLOT	10
+#define MIXED_PAGES	1024	/* 4 MiB: a whole 2 MiB hugepage inside */
+
+static void guest_mixed_attrs(void)
+{
+	u64 *nx_page = (u64 *)MIXED_GPA;
+	u64 *nw_page = (u64 *)(MIXED_GPA + PAGE_SIZE);
+
+	/* The first touch maps the region: a read of a no-exec page. */
+	GUEST_SYNC(READ_ONCE(*nx_page));
+	/* A write to the no-write page next to it must be denied. */
+	WRITE_ONCE(*nw_page, 0xbad);
+	GUEST_SYNC(READ_ONCE(*nw_page));
+	GUEST_DONE();
+}
+
+static void test_plane_hugepage_mixed_attrs(void)
+{
+	struct kvm_plane_memory_attributes attrs = {
+		.plane = 0,
+		.size = PAGE_SIZE,
+	};
+	struct kvm_vm *vm;
+	struct kvm_vcpu *vcpu;
+	struct kvm_run *run;
+	struct ucall uc;
+	u64 *host;
+	int i, r;
+
+	TEST_REQUIRE(kvm_has_cap(KVM_CAP_PLANES_USERSPACE_SWITCH));
+	TEST_REQUIRE(thp_configured());
+
+	kvm_force_split_irqchip = true;
+	vm = __vm_create(VM_SHAPE_DEFAULT, 1, 0);
+	kvm_force_split_irqchip = false;
+	vm_enable_cap(vm, KVM_CAP_PLANES_USERSPACE_SWITCH, 0);
+
+	vm_userspace_mem_region_add(vm, VM_MEM_SRC_ANONYMOUS_THP, MIXED_GPA,
+				    MIXED_SLOT, MIXED_PAGES, 0);
+	virt_map(vm, MIXED_GPA, MIXED_GPA, MIXED_PAGES);
+	host = addr_gpa2hva(vm, MIXED_GPA);
+	memset(host, 0, MIXED_PAGES * PAGE_SIZE);
+	host[0] = 0x11;
+	host[PAGE_SIZE / sizeof(u64)] = 0x22;
+
+	vcpu = vm_vcpu_add(vm, 0, guest_mixed_attrs);
+	vm_plane_add(vm, 1);
+	run = vcpu->run;
+
+	/* As VTL1 would: alternate NX and NW over the hugepage's 4 KiB pages. */
+	for (i = 0; i < 512; i++) {
+		attrs.address = MIXED_GPA + i * PAGE_SIZE;
+		attrs.attributes = (i & 1) ? KVM_MEMORY_ATTRIBUTE_NW :
+					     KVM_MEMORY_ATTRIBUTE_NX;
+		vm_ioctl(vm, KVM_SET_PLANE_MEMORY_ATTRIBUTES, &attrs);
+	}
+
+	vcpu_run(vcpu);
+	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_SYNC);
+	TEST_ASSERT_EQ(uc.args[1], 0x11);
+
+	r = _vcpu_run(vcpu);
+	TEST_ASSERT(r == -1 && errno == EFAULT,
+		    "write to the NW page: ret %d errno %d, exit %u",
+		    r, errno, run->exit_reason);
+	TEST_ASSERT_EQ(run->exit_reason, KVM_EXIT_MEMORY_FAULT);
+	TEST_ASSERT_EQ(run->memory_fault.gpa, MIXED_GPA + PAGE_SIZE);
+	TEST_ASSERT(run->memory_fault.flags & KVM_MEMORY_EXIT_FLAG_PLANE,
+		    "memory_fault.flags 0x%llx", run->memory_fault.flags);
+	TEST_ASSERT_EQ(run->memory_fault.plane, 0);
+	TEST_ASSERT_EQ(host[PAGE_SIZE / sizeof(u64)], 0x22);
+
+	/* Lift the protection: the write goes through at the right level. */
+	attrs.address = MIXED_GPA + PAGE_SIZE;
+	attrs.attributes = 0;
+	vm_ioctl(vm, KVM_SET_PLANE_MEMORY_ATTRIBUTES, &attrs);
+	vcpu_run(vcpu);
+	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_SYNC);
+	TEST_ASSERT_EQ(uc.args[1], 0xbad);
+	vcpu_run(vcpu);
+	TEST_ASSERT_EQ(get_ucall(vcpu, &uc), UCALL_DONE);
+
+	kvm_vm_free(vm);
+	ksft_test_result_pass("hugepage over mixed plane attributes is split\n");
+}
+
 int main(int argc, char *argv[])
 {
 	struct kvm_vm *vm = vm_create_barebones_irqchip(true);
@@ -677,7 +769,7 @@ int main(int argc, char *argv[])
 	TEST_REQUIRE(cap_planes && cap_planes > 1);
 
 	ksft_print_header();
-	ksft_set_plan(9);
+	ksft_set_plan(10);
 
 	pr_info("# KVM_CAP_PLANES: %d\n", cap_planes);
 
@@ -690,6 +782,7 @@ int main(int argc, char *argv[])
 	test_plane_lower_interrupt();
 	test_plane_not_runnable_interrupt();
 	test_plane_cpuid_runtime();
+	test_plane_hugepage_mixed_attrs();
 
 	ksft_finished();
 }
