@@ -5318,6 +5318,9 @@ static struct file_operations kvm_plane_fops = {
 
 void kvm_vcpu_set_plane_runnable(struct kvm_vcpu *vcpu)
 {
+	if (vcpu->plane_level == 0 && vcpu->plane_user_stopped)
+		trace_printk("vsm-dbg: plane0 vcpu%d runnable from %pS\n",
+			     vcpu->vcpu_idx, (void *)_RET_IP_);
 	vcpu->plane_state = RUNNABLE;
 	vcpu->common->plane_switch = true;
 	kvm_make_request(KVM_REQ_PLANE_RESCHED, vcpu);
@@ -5349,6 +5352,9 @@ struct kvm_vcpu *kvm_vcpu_select_plane(struct kvm_vcpu *vcpu)
 
 	if (ret == NULL) {
 		ret = common->vcpus[0];
+		if (ret->plane_user_stopped)
+			trace_printk("vsm-dbg: select_plane fallback forced plane0 vcpu%d\n",
+				     ret->vcpu_idx);
 		ret->plane_state = RUNNABLE;
 	}
 

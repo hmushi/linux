@@ -4671,8 +4671,11 @@ static int kvm_faultin_memory_protections(struct kvm_vcpu *vcpu,
 		return RET_PF_CONTINUE;
 
 	trace_kvm_faultin_memory_protections(vcpu, fault, access);
-	if (__permission_fault(vcpu->arch.mmu, access, fault))
+	if (__permission_fault(vcpu->arch.mmu, access, fault)) {
+		trace_printk("vsm-dbg: plane %u gfn %llx access %x exec %d\n",
+			     vcpu->plane_level, fault->gfn, access, fault->exec);
 		return -EFAULT;
+	}
 
 	fault->host_access &= access;
 	return RET_PF_CONTINUE;
