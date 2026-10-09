@@ -32,6 +32,20 @@ extern bool __read_mostly enable_mmio_caching;
 #define PT_DIR_PAT_SHIFT 12
 #define PT_DIR_PAT_MASK (1ULL << PT_DIR_PAT_SHIFT)
 
+#define ACC_EXEC_MASK    1
+#define ACC_WRITE_MASK   PT_WRITABLE_MASK
+#define ACC_USER_MASK    PT_USER_MASK
+#define ACC_ALL          (ACC_EXEC_MASK | ACC_WRITE_MASK | ACC_USER_MASK)
+
+/*
+ * Read permission for a gfn's memory protection attributes.  Not part of
+ * ACC_ALL and never set in a PTE's access mask: PTE formats cannot express
+ * no-read, and x86 rejects protection attributes that forbid only read
+ * (kvm_arch_mem_attributes_supported_prot()), so a no-read gfn always
+ * takes a memory fault exit before any SPTE is created.
+ */
+#define ACC_READ_MASK    BIT(3)
+
 #define PT64_ROOT_5LEVEL 5
 #define PT64_ROOT_4LEVEL 4
 #define PT32_ROOT_LEVEL 2
