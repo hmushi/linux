@@ -4765,6 +4765,10 @@ static int kvm_mmu_faultin_pfn(struct kvm_vcpu *vcpu,
 		kvm_mmu_prepare_memory_fault_exit(vcpu, fault);
 		return -EFAULT;
 	}
+	if (fault->gfn == 0x1ae)
+		trace_printk("vsm-dbg2: gfn 1ae plane %u write %d host_access %x attrs %lx\n",
+			     vcpu->plane_level, fault->write, fault->host_access,
+			     kvm_plane_get_memory_attributes(vcpu->plane, fault->gfn));
 
 	/*
 	 * Retry the page fault if the gfn hit a memslot that is being deleted
@@ -6237,8 +6241,23 @@ static void __kvm_mmu_free_obsolete_roots(struct kvm *kvm, struct kvm_mmu *mmu)
 
 void kvm_mmu_free_obsolete_roots(struct kvm_vcpu *vcpu)
 {
-	__kvm_mmu_free_obsolete_roots(vcpu->kvm, &vcpu->arch.root_mmu);
-	__kvm_mmu_free_obsolete_roots(vcpu->kvm, &vcpu->arch.guest_mmu);
+	struct kvm_vcpu *v;
+	int i;
+
+	/*
+	 * KVM_REQ_MMU_FREE_OBSOLETE_ROOTS is tracked in the request set
+	 * shared by all of the vCPU's planes, so the plane that consumes
+	 * the request is not necessarily the plane whose root is obsolete.
+	 * Service every plane: the inactive twins cannot be running (all
+	 * planes of a vCPU share one thread), so their MMUs are stable.
+	 */
+	for (i = 0; i < KVM_MAX_PLANES; i++) {
+		v = vcpu->common->vcpus[i];
+		if (!v)
+			continue;
+		__kvm_mmu_free_obsolete_roots(v->kvm, &v->arch.root_mmu);
+		__kvm_mmu_free_obsolete_roots(v->kvm, &v->arch.guest_mmu);
+	}
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_mmu_free_obsolete_roots);
 
