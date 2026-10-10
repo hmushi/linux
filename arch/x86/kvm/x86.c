@@ -6310,6 +6310,7 @@ bool kvm_arch_is_vcpu_plane_ioctl(unsigned ioctl)
 	case KVM_GET_XSAVE2:
 	case KVM_SET_XSAVE:
 	case KVM_GET_REG_LIST:
+	case KVM_TRANSLATE:
 		return true;
 	default:
 		return false;
