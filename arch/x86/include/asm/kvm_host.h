@@ -731,6 +731,14 @@ struct kvm_vcpu_hv {
 		u64 vm_id;
 		u32 vp_id;
 	} nested;
+
+	/*
+	 * RAX/RCX of the lower VTL captured at VTL entry, restored on a
+	 * non-fast VTL return when this plane has no VP assist page to
+	 * carry them in its VTL control area.
+	 */
+	u64 vtl_entry_rax;
+	u64 vtl_entry_rcx;
 };
 
 struct kvm_hypervisor_cpuid {
@@ -1202,6 +1210,12 @@ enum hv_tsc_page_status {
 /* Hyper-V emulation context */
 struct kvm_hv {
 	struct mutex hv_lock;
+	bool hv_inkernel_vtl_switch;
+	/*
+	 * In-kernel VTL switches performed by this VM, counted against the
+	 * hv_vtl_switch_limit debug knob; saturates instead of wrapping.
+	 */
+	atomic_t vtl_switch_count;
 	/*
 	 * GUEST_OS_ID and the hypercall page are per-VTL instances in the
 	 * TLFS; bank them per plane so a higher VTL enabling its own
