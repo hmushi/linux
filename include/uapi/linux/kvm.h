@@ -99,6 +99,8 @@ struct kvm_hyperv_exit {
 #define KVM_EXIT_HYPERV_SYNIC          1
 #define KVM_EXIT_HYPERV_HCALL          2
 #define KVM_EXIT_HYPERV_SYNDBG         3
+#define KVM_EXIT_HYPERV_VTL_INTERRUPT  4
+#define KVM_EXIT_HYPERV_REG_INTERCEPT  5
 	__u32 type;
 	__u32 plane;
 	union {
@@ -114,6 +116,15 @@ struct kvm_hyperv_exit {
 			__u64 result;
 			__u64 params[2];
 		} hcall;
+		struct {
+			__u32 reg;
+			__u8 insn_len;
+			__u8 pad[3];
+			__u64 base;
+			__u32 limit;
+			__u32 pad2;
+			__u64 rip;
+		} reg_intercept;
 		struct {
 			__u32 msr;
 			__u32 pad2;
@@ -1026,6 +1037,7 @@ struct kvm_enable_cap {
 #define KVM_HV_HCALL_RESULT_RAISE_UD	(1ULL << 63)
 #define KVM_CAP_HCALL_FAULT_EXIT 252
 #define KVM_CAP_HYPERV_VTL_SWITCH 253
+#define KVM_CAP_HYPERV_REG_INTERCEPT 254
 
 struct kvm_irq_routing_irqchip {
 	__u32 irqchip;

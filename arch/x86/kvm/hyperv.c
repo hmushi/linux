@@ -2364,7 +2364,8 @@ ret_success:
 }
 
 static void kvm_hv_send_ipi_to_many(struct kvm *kvm, u32 vector,
-				    u64 *sparse_banks, u64 valid_bank_mask)
+				    u64 *sparse_banks, u64 valid_bank_mask,
+				    int target_plane)
 {
 	struct kvm_lapic_irq irq = {
 		.delivery_mode = APIC_DM_FIXED,
@@ -2374,13 +2375,25 @@ static void kvm_hv_send_ipi_to_many(struct kvm *kvm, u32 vector,
 	unsigned long i;
 
 	kvm_for_each_vcpu(i, vcpu, kvm) {
+		struct kvm_vcpu *target = vcpu;
+
 		if (sparse_banks &&
 		    !hv_is_vp_in_sparse_set(kvm_hv_get_vpindex(vcpu),
 					    valid_bank_mask, sparse_banks))
 			continue;
 
+		/*
+		 * TLFS: the IPI targets the VPs' in_vtl (or the sender's
+		 * VTL): deliver into that plane's APIC.
+		 */
+		if (target_plane) {
+			target = vcpu->common->vcpus[target_plane];
+			if (!target)
+				continue;
+		}
+
 		/* We fail only when APIC is disabled */
-		kvm_apic_set_irq(vcpu, &irq, NULL);
+		kvm_apic_set_irq(target, &irq, NULL);
 	}
 }
 
@@ -2393,6 +2406,8 @@ static int kvm_hv_send_ipi(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
 	struct hv_send_ipi send_ipi;
 	u64 valid_bank_mask;
 	u32 vector;
+	u8 in_vtl = 0;
+	int target_plane;
 	bool all_cpus;
 	int r;
 
@@ -2410,13 +2425,25 @@ static int kvm_hv_send_ipi(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
 				return HV_STATUS_INVALID_HYPERCALL_INPUT;
 			sparse_banks[0] = send_ipi.cpu_mask;
 			vector = send_ipi.vector;
+			in_vtl = send_ipi.in_vtl.as_uint8;
 		} else {
 			/* 'reserved' part of hv_send_ipi should be 0 */
-			if (unlikely(hc->ingpa >> 32 != 0))
+			if (unlikely(hc->ingpa >> 40 != 0))
 				return HV_STATUS_INVALID_HYPERCALL_INPUT;
 			sparse_banks[0] = hc->outgpa;
 			vector = (u32)hc->ingpa;
+			in_vtl = (hc->ingpa >> 32) & 0xff;
 		}
+
+		/*
+		 * Only hv_input_vtl.target_vtl (bits 3:0) and
+		 * use_target_vtl (bit 4) are defined; reserved_z (7:5)
+		 * must be zero in every form of the hypercall, before
+		 * anything is delivered.
+		 */
+		if (unlikely(in_vtl & 0xe0))
+			return HV_STATUS_INVALID_HYPERCALL_INPUT;
+
 		all_cpus = false;
 		valid_bank_mask = BIT_ULL(0);
 
@@ -2426,11 +2453,17 @@ static int kvm_hv_send_ipi(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
 			if (unlikely(kvm_read_guest(kvm, hc->ingpa, &send_ipi_ex,
 						    sizeof(send_ipi_ex))))
 				return HV_STATUS_INVALID_HYPERCALL_INPUT;
+			in_vtl = send_ipi_ex.in_vtl.as_uint8;
 		} else {
 			send_ipi_ex.vector = (u32)hc->ingpa;
 			send_ipi_ex.vp_set.format = hc->outgpa;
 			send_ipi_ex.vp_set.valid_bank_mask = sse128_lo(hc->xmm[0]);
+			in_vtl = (hc->ingpa >> 32) & 0xff;
 		}
+
+		/* As above: hv_input_vtl bits 7:5 are reserved. */
+		if (unlikely(in_vtl & 0xe0))
+			return HV_STATUS_INVALID_HYPERCALL_INPUT;
 
 		trace_kvm_hv_send_ipi_ex(send_ipi_ex.vector,
 					 send_ipi_ex.vp_set.format,
@@ -2463,10 +2496,23 @@ check_and_send_ipi:
 	if ((vector < HV_IPI_LOW_VECTOR) || (vector > HV_IPI_HIGH_VECTOR))
 		return HV_STATUS_INVALID_HYPERCALL_INPUT;
 
-	if (all_cpus)
-		kvm_hv_send_ipi_to_many(kvm, vector, NULL, 0);
+	/* TLFS: in_vtl bit 4 selects an explicit target VTL. */
+	if (in_vtl & 0x10)
+		target_plane = in_vtl & 0xf;
 	else
-		kvm_hv_send_ipi_to_many(kvm, vector, sparse_banks, valid_bank_mask);
+		target_plane = vcpu->plane_level;
+	if (target_plane >= KVM_MAX_PLANES)
+		return HV_STATUS_INVALID_HYPERCALL_INPUT;
+
+	trace_printk("vsm-ipi: vcpu%d plane%d vec=%x target_plane=%d banks=%llx\n",
+		     vcpu->vcpu_idx, vcpu->plane_level, vector, target_plane,
+		     sparse_banks ? sparse_banks[0] : ~0ULL);
+
+	if (all_cpus)
+		kvm_hv_send_ipi_to_many(kvm, vector, NULL, 0, target_plane);
+	else
+		kvm_hv_send_ipi_to_many(kvm, vector, sparse_banks,
+					valid_bank_mask, target_plane);
 
 ret_success:
 	return HV_STATUS_SUCCESS;
@@ -2772,6 +2818,109 @@ static u64 hv_vtl_assist_page_gpa(struct kvm_vcpu *vcpu)
  * Returns -ENOENT when the transition cannot be handled here (no twin
  * plane); the caller forwards the hypercall to userspace unchanged.
  */
+/*
+ * Enter a higher VTL because it has a pending interrupt (TLFS: higher
+ * VTL interrupts preempt lower VTL execution).  The lower VTL is
+ * suspended mid-instruction, not in a hypercall, so no completion is
+ * pended for it: it resumes at the preempted RIP when the higher VTL
+ * returns, and the entered VTL's control area carries the INTERRUPT
+ * entry reason with the preempted RAX/RCX.
+ */
+#define HV_VTL_ENTRY_REASON_INTERRUPT	2
+
+bool kvm_hv_vtl_interrupt_entry(struct kvm_vcpu *vcpu,
+				struct kvm_vcpu *target)
+{
+	u64 rax = kvm_rax_read(vcpu), rcx = kvm_rcx_read(vcpu);
+	struct hv_vtl_control ctl;
+	u64 assist;
+	int i;
+
+	static const int shared_gprs[] = {
+		VCPU_REGS_RAX, VCPU_REGS_RBX, VCPU_REGS_RCX, VCPU_REGS_RDX,
+		VCPU_REGS_RSI, VCPU_REGS_RDI, VCPU_REGS_RBP,
+		VCPU_REGS_R8, VCPU_REGS_R9, VCPU_REGS_R10, VCPU_REGS_R11,
+		VCPU_REGS_R12, VCPU_REGS_R13, VCPU_REGS_R14, VCPU_REGS_R15,
+	};
+
+	/*
+	 * Never force an entry into a plane that has never entered the
+	 * guest: it still holds reset state (userspace owns
+	 * HvCallEnableVpVtl and runs a plane's first entry itself).  The
+	 * event stays pending until the plane is started.
+	 */
+	if (target->arch.last_vmentry_cpu == -1)
+		return false;
+
+	/*
+	 * No kvm_rip_read(target) here: with the source's VMCS loaded a
+	 * VMX register-cache miss would fill the suspended target's RIP
+	 * from the wrong VMCS and mark it available.
+	 */
+	trace_printk("vsm-vina: vcpu%d %d->%d rip=%lx\n",
+		     vcpu->vcpu_idx, vcpu->plane_level, target->plane_level,
+		     kvm_rip_read(vcpu));
+
+	/*
+	 * The hcall.result write below assumes the target's armed
+	 * completion is the hypercall one.  Any other pending completion
+	 * (MMIO, PIO) owns the shared run union and must consume it
+	 * before the plane is resumed with a hypercall result; leave
+	 * such a plane to userspace and keep the event pending.
+	 */
+	if (target->arch.complete_userspace_io &&
+	    target->arch.complete_userspace_io != kvm_hv_hypercall_complete_userspace)
+		return false;
+
+	/*
+	 * Write the entered plane's control area through the entered
+	 * plane's vCPU: the write must pass that plane's own memory
+	 * attributes and memslot view, not the suspending plane's (which
+	 * typically has no access to the higher VTL's assist page).  On
+	 * failure leave both planes untouched; the event stays pending in
+	 * the target and the entry is retried.
+	 */
+	assist = hv_vtl_assist_page_gpa(target);
+	if (assist) {
+		ctl = (struct hv_vtl_control) {
+			.vtl_entry_reason = HV_VTL_ENTRY_REASON_INTERRUPT,
+			.vtl_ret_x64rax = rax,
+			.vtl_ret_x64rcx = rcx,
+		};
+		if (kvm_vcpu_write_guest(target, assist + HV_VTL_CONTROL_OFFSET,
+					 &ctl, sizeof(ctl)))
+			return false;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(shared_gprs); i++)
+		kvm_register_write_raw(target, shared_gprs[i],
+				       kvm_register_read_raw(vcpu,
+							     shared_gprs[i]));
+	target->arch.cr2 = vcpu->arch.cr2;
+	vcpu->common->vtl_fpu_from = vcpu->plane_level;
+
+	if (to_hv_vcpu(target)) {
+		to_hv_vcpu(target)->vtl_entry_rax = rax;
+		to_hv_vcpu(target)->vtl_entry_rcx = rcx;
+	}
+
+	/*
+	 * The target resumes its suspended hypercall, if it has one.  The
+	 * resume value is the target's own guest-written RAX; strip the
+	 * VMM-only RAISE_UD control bit so the completion cannot be made
+	 * to inject #UD by the guest.
+	 */
+	if (target->arch.complete_userspace_io)
+		vcpu->run->hyperv.u.hcall.result = kvm_rax_read(target) &
+						   ~KVM_HV_HCALL_RESULT_RAISE_UD;
+
+	vcpu->plane_user_stopped = true;
+	kvm_vcpu_set_plane_stopped(vcpu);
+	target->plane_user_stopped = false;
+	kvm_vcpu_set_plane_runnable(target);
+	return true;
+}
+
 static int hv_vtl_switch_limit = -1;
 module_param(hv_vtl_switch_limit, int, 0644);
 
@@ -2797,9 +2946,35 @@ static int kvm_hv_vtl_switch(struct kvm_vcpu *vcpu, bool is_return)
 		return -ENOENT;
 	target = vcpu->common->vcpus[to];
 
-	trace_printk("vsm-sw: vcpu%d %d->%d rip=%llx->%llx rax=%llx cui=%d\n",
-		     vcpu->vcpu_idx, cur, to, kvm_rip_read(vcpu),
-		     kvm_rip_read(target), rax,
+	/*
+	 * The resume protocol below delivers the result through the
+	 * target's armed hypercall completion.  A target parked on any
+	 * other completion (MMIO, PIO) owns the shared run union; writing
+	 * hcall.result over it would feed the pending completion garbage
+	 * and lose the resume value.  Forward such a switch to userspace.
+	 */
+	if (target->arch.complete_userspace_io &&
+	    target->arch.complete_userspace_io != kvm_hv_hypercall_complete_userspace)
+		return -ENOENT;
+
+	/*
+	 * Userspace owns HvCallEnableVpVtl state; the kernel only knows a
+	 * plane vCPU exists, and VMMs create those at setup time.  Refuse
+	 * to call into a plane that has never entered the guest: it still
+	 * holds reset state, and the reference host fails such a call with
+	 * HV_STATUS_INVALID_VP_STATE.  Forwarding lets userspace apply its
+	 * enablement tracking (and run the plane's first entry itself).
+	 */
+	if (!is_return && target->arch.last_vmentry_cpu == -1)
+		return -ENOENT;
+
+	/*
+	 * No kvm_rip_read(target) here: with the source's VMCS loaded a
+	 * VMX register-cache miss would fill the suspended target's RIP
+	 * from the wrong VMCS and mark it available.
+	 */
+	trace_printk("vsm-sw: vcpu%d %d->%d rip=%lx rax=%llx cui=%d\n",
+		     vcpu->vcpu_idx, cur, to, kvm_rip_read(vcpu), rax,
 		     target->arch.complete_userspace_io != NULL);
 
 	/*
@@ -2824,6 +2999,27 @@ static int kvm_hv_vtl_switch(struct kvm_vcpu *vcpu, bool is_return)
 			ctl.vtl_ret_x64rax = to_hv_vcpu(vcpu)->vtl_entry_rax;
 			ctl.vtl_ret_x64rcx = to_hv_vcpu(vcpu)->vtl_entry_rcx;
 		}
+	} else if (!is_return) {
+		/*
+		 * Write the entered VTL's control area through the entered
+		 * plane's vCPU: the write must pass that plane's memory
+		 * attributes and memslot view, and the higher VTL normally
+		 * protects its assist page against the caller's plane.
+		 * Fail before any state moves (mirroring the read above);
+		 * userspace then owns the switch.
+		 */
+		assist = hv_vtl_assist_page_gpa(target);
+		if (assist) {
+			ctl = (struct hv_vtl_control) {
+				.vtl_entry_reason = HV_VTL_ENTRY_REASON_VTL_CALL,
+				.vtl_ret_x64rax = rax,
+				.vtl_ret_x64rcx = rcx,
+			};
+			if (kvm_vcpu_write_guest(target,
+						 assist + HV_VTL_CONTROL_OFFSET,
+						 &ctl, sizeof(ctl)))
+				return -ENOENT;
+		}
 	}
 
 	/* VTL-shared state: GPRs except RSP (RIP/RFLAGS stay private). */
@@ -2835,17 +3031,6 @@ static int kvm_hv_vtl_switch(struct kvm_vcpu *vcpu, bool is_return)
 	vcpu->common->vtl_fpu_from = cur;
 
 	if (!is_return) {
-		assist = hv_vtl_assist_page_gpa(target);
-		if (assist) {
-			ctl = (struct hv_vtl_control) {
-				.vtl_entry_reason = HV_VTL_ENTRY_REASON_VTL_CALL,
-				.vtl_ret_x64rax = rax,
-				.vtl_ret_x64rcx = rcx,
-			};
-			kvm_vcpu_write_guest(vcpu,
-					     assist + HV_VTL_CONTROL_OFFSET,
-					     &ctl, sizeof(ctl));
-		}
 		if (to_hv_vcpu(target)) {
 			to_hv_vcpu(target)->vtl_entry_rax = rax;
 			to_hv_vcpu(target)->vtl_entry_rcx = rcx;
@@ -2864,9 +3049,27 @@ static int kvm_hv_vtl_switch(struct kvm_vcpu *vcpu, bool is_return)
 	 * exactly as when userspace drives the switch; until then its
 	 * suspended RIP stays at the vmcall, which the higher VTL can
 	 * observe (and rewrite) through HvCallGetVpRegisters.
+	 *
+	 * The resume value is guest-derived in all three cases (the
+	 * caller's RAX on a call or a fast return, the control area on a
+	 * non-fast return): strip the VMM-only RAISE_UD control bit so
+	 * the completion cannot be made to inject #UD into the suspended
+	 * plane.
 	 */
+	resume &= ~KVM_HV_HCALL_RESULT_RAISE_UD;
 	if (target->arch.complete_userspace_io)
 		vcpu->run->hyperv.u.hcall.result = resume;
+	else
+		/*
+		 * No completion is armed when the target's suspension
+		 * already retired its vmcall (forwarded switch) or was a
+		 * forced interrupt entry: RIP is already where the plane
+		 * resumes, so deliver the resume RAX directly.  Without
+		 * this the GPR copy above leaves the switching plane's raw
+		 * RAX in place and a non-fast return never restores the
+		 * control-area value.
+		 */
+		kvm_rax_write(target, resume);
 
 	/*
 	 * Suspend the current plane in its uncompleted hypercall; the

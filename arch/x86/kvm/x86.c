@@ -959,6 +959,10 @@ static void kvm_multiple_exception(struct kvm_vcpu *vcpu, unsigned int nr,
 
 void kvm_queue_exception(struct kvm_vcpu *vcpu, unsigned nr)
 {
+	if (nr == UD_VECTOR && vcpu->plane_level)
+		trace_printk("vsm-ud: queue-ud vcpu%d plane%d rip=%lx\n",
+			     vcpu->vcpu_idx, vcpu->plane_level,
+			     kvm_rip_read(vcpu));
 	kvm_multiple_exception(vcpu, nr, false, 0, false, 0);
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_queue_exception);
@@ -1048,6 +1052,10 @@ void kvm_inject_page_fault(struct kvm_vcpu *vcpu, struct x86_exception *fault)
 void kvm_inject_emulated_page_fault(struct kvm_vcpu *vcpu,
 				    struct x86_exception *fault)
 {
+	trace_printk("vsm-pf: vcpu%d plane%d cr2=%llx err=%x cr3=%llx\n",
+		     vcpu->vcpu_idx, vcpu->plane_level,
+		     fault->address, (unsigned)fault->error_code,
+		     kvm_read_cr3(vcpu));
 	struct kvm_mmu *fault_mmu;
 	WARN_ON_ONCE(fault->vector != PF_VECTOR);
 
@@ -2289,6 +2297,15 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(handle_fastpath_invd);
 
 int kvm_handle_invalid_op(struct kvm_vcpu *vcpu)
 {
+	u32 reason, intr, err;
+	u64 i1, i2;
+
+	kvm_x86_call(get_exit_info)(vcpu, &reason, &i1, &i2, &intr, &err);
+	trace_printk("vsm-ud: invalid-op vcpu%d plane%d rip=%lx exit=%u rdseed-cap=%d rdrand-cap=%d\n",
+		     vcpu->vcpu_idx, vcpu->plane_level, kvm_rip_read(vcpu),
+		     reason,
+		     guest_cpu_cap_has(vcpu, X86_FEATURE_RDSEED),
+		     guest_cpu_cap_has(vcpu, X86_FEATURE_RDRAND));
 	kvm_queue_exception(vcpu, UD_VECTOR);
 	return 1;
 }
@@ -4885,6 +4902,7 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_SYS_HYPERV_CPUID:
 	case KVM_CAP_HYPERV_FORWARD_HCALL:
 	case KVM_CAP_HYPERV_VTL_SWITCH:
+	case KVM_CAP_HYPERV_REG_INTERCEPT:
 #endif
 	case KVM_CAP_HCALL_FAULT_EXIT:
 	case KVM_CAP_PCI_SEGMENT:
@@ -6144,6 +6162,19 @@ static int kvm_vcpu_ioctl_enable_cap(struct kvm_vcpu *vcpu,
 			}
 			return r;
 		}
+	case KVM_CAP_HYPERV_REG_INTERCEPT: {
+		struct kvm_vcpu_hv *hv_vcpu;
+		int r;
+
+		r = kvm_hv_vcpu_init(vcpu);
+		if (r)
+			return r;
+		hv_vcpu = to_hv_vcpu(vcpu);
+		hv_vcpu->reg_intercept_control = cap->args[0];
+		/* Refresh the descriptor-table exiting controls. */
+		kvm_x86_call(vcpu_after_set_cpuid)(vcpu);
+		return 0;
+	}
 	case KVM_CAP_HYPERV_DIRECT_TLBFLUSH:
 		if (!kvm_x86_ops.enable_l2_tlb_flush)
 			return -ENOTTY;
@@ -8814,14 +8845,59 @@ static void emulator_get_idt(struct x86_emulate_ctxt *ctxt, struct desc_ptr *dt)
 	kvm_x86_call(get_idt)(emul_to_vcpu(ctxt), dt);
 }
 
+/*
+ * Divert a descriptor-table write into a register-intercept exit when the
+ * higher VTL armed one: the write is not applied, and userspace delivers
+ * the TLFS register-intercept message to the higher VTL.
+ */
+static bool hv_divert_dt_write(struct x86_emulate_ctxt *ctxt, u32 hv_reg,
+			       const struct desc_ptr *dt, u64 ctl_bit)
+{
+#ifdef CONFIG_KVM_HYPERV
+	struct kvm_vcpu *vcpu = emul_to_vcpu(ctxt);
+	struct kvm_vcpu_hv *hv_vcpu = to_hv_vcpu(vcpu);
+
+	if (!hv_vcpu || vcpu->plane_level ||
+	    !(hv_vcpu->reg_intercept_control & ctl_bit))
+		return false;
+
+	hv_vcpu->reg_intercept.reg = hv_reg;
+	hv_vcpu->reg_intercept.base = dt->address;
+	hv_vcpu->reg_intercept.limit = dt->size;
+	hv_vcpu->reg_intercept.rip = ctxt->eip;
+	hv_vcpu->reg_intercept.insn_len = ctxt->_eip - ctxt->eip;
+	hv_vcpu->reg_intercept.pending = true;
+	trace_printk("vsm-regint: vcpu%d reg=%x base=%llx/%x rip=%llx len=%u\n",
+		     vcpu->vcpu_idx, hv_reg, hv_vcpu->reg_intercept.base,
+		     hv_vcpu->reg_intercept.limit, hv_vcpu->reg_intercept.rip,
+		     hv_vcpu->reg_intercept.insn_len);
+	return true;
+#else
+	return false;
+#endif
+}
+
+#define HV_CR_INTERCEPT_GDTR_WRITE	BIT_ULL(15)
+#define HV_CR_INTERCEPT_IDTR_WRITE	BIT_ULL(16)
+#define HV_X64_REGISTER_IDTR_ID		0x00070000
+#define HV_X64_REGISTER_GDTR_ID		0x00070001
+
 static void emulator_set_gdt(struct x86_emulate_ctxt *ctxt, struct desc_ptr *dt)
 {
+	if (hv_divert_dt_write(ctxt, HV_X64_REGISTER_GDTR_ID, dt,
+			       HV_CR_INTERCEPT_GDTR_WRITE))
+		return;
 	kvm_x86_call(set_gdt)(emul_to_vcpu(ctxt), dt);
 }
 
 static void emulator_set_idt(struct x86_emulate_ctxt *ctxt, struct desc_ptr *dt)
 {
-	kvm_x86_call(set_idt)(emul_to_vcpu(ctxt), dt);
+	struct kvm_vcpu *vcpu = emul_to_vcpu(ctxt);
+
+	if (hv_divert_dt_write(ctxt, HV_X64_REGISTER_IDTR_ID, dt,
+			       HV_CR_INTERCEPT_IDTR_WRITE))
+		return;
+	kvm_x86_call(set_idt)(vcpu, dt);
 }
 
 static unsigned long emulator_get_cached_segment_base(
@@ -9607,6 +9683,44 @@ int x86_decode_emulated_instruction(struct kvm_vcpu *vcpu, int emulation_type,
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(x86_decode_emulated_instruction);
 
+#ifdef CONFIG_KVM_HYPERV
+/*
+ * Complete a descriptor-table write that hv_divert_dt_write() diverted
+ * during the emulation that just finished: rewind RIP and build the
+ * KVM_EXIT_HYPERV_REG_INTERCEPT exit.  Consuming the record before
+ * x86_emulate_instruction() returns means it never outlives the emulation
+ * call: no stale rewind can fire on a later KVM_RUN, and disarming the cap
+ * or migrating the vCPU can never see a half-delivered intercept.
+ */
+static int complete_hv_reg_intercept(struct kvm_vcpu *vcpu)
+{
+	struct kvm_vcpu_hv *hv_vcpu = to_hv_vcpu(vcpu);
+
+	hv_vcpu->reg_intercept.pending = false;
+
+	/*
+	 * The intercepted instruction must not retire: the emulator advanced
+	 * RIP when it diverted the write, but the higher VTL owns
+	 * completion.  It either applies the write and advances RIP itself,
+	 * disarms the intercept so re-execution succeeds, or queues an
+	 * exception that must fault AT the instruction (the
+	 * kernel-patch-protection LIDT probe matches the faulting RIP
+	 * against the probe site).
+	 */
+	kvm_rip_write(vcpu, hv_vcpu->reg_intercept.rip);
+	vcpu->run->exit_reason = KVM_EXIT_HYPERV;
+	vcpu->run->hyperv.type = KVM_EXIT_HYPERV_REG_INTERCEPT;
+	vcpu->run->hyperv.plane = vcpu->plane_level;
+	vcpu->run->hyperv.u.reg_intercept.reg = hv_vcpu->reg_intercept.reg;
+	vcpu->run->hyperv.u.reg_intercept.insn_len =
+		hv_vcpu->reg_intercept.insn_len;
+	vcpu->run->hyperv.u.reg_intercept.base = hv_vcpu->reg_intercept.base;
+	vcpu->run->hyperv.u.reg_intercept.limit = hv_vcpu->reg_intercept.limit;
+	vcpu->run->hyperv.u.reg_intercept.rip = hv_vcpu->reg_intercept.rip;
+	return 0;
+}
+#endif
+
 int x86_emulate_instruction(struct kvm_vcpu *vcpu, gpa_t cr2_or_gpa,
 			    int emulation_type, void *insn, int insn_len)
 {
@@ -9825,6 +9939,15 @@ writeback:
 			kvm_make_request(KVM_REQ_EVENT, vcpu);
 	} else
 		vcpu->arch.emulate_regs_need_sync_to_vcpu = true;
+
+#ifdef CONFIG_KVM_HYPERV
+	{
+		struct kvm_vcpu_hv *hv_vcpu = to_hv_vcpu(vcpu);
+
+		if (hv_vcpu && hv_vcpu->reg_intercept.pending)
+			r = complete_hv_reg_intercept(vcpu);
+	}
+#endif
 
 	return r;
 }
@@ -11083,6 +11206,65 @@ out:
 	return r;
 }
 
+/*
+ * A pending interrupt for a higher plane preempts this one: the higher
+ * VTL's interrupts take priority over lower-VTL execution (TLFS 15.2.4),
+ * and the secure kernel relies on it, e.g. to freeze the other processors'
+ * VTL1 while starting a new one.
+ */
+static struct kvm_vcpu *kvm_higher_plane_with_event(struct kvm_vcpu *vcpu)
+{
+	struct kvm_vcpu *higher;
+	int i;
+
+	for (i = vcpu->plane_level + 1; i < KVM_MAX_PLANES; i++) {
+		higher = vcpu->common->vcpus[i];
+		if (!higher)
+			continue;
+		/*
+		 * Test raw pending-ness, not injectability:
+		 * kvm_cpu_has_injectable_intr() reports false on an
+		 * APICv-active vCPU, and a suspended plane may carry a
+		 * stale apicv_active until it next runs.  A pending
+		 * synthetic-timer request counts as well: it can only be
+		 * processed (and its interrupt delivered) once the higher
+		 * plane runs, so it would otherwise never fire while the
+		 * plane is suspended.
+		 */
+		if (kvm_cpu_has_extint(higher) ||
+		    kvm_apic_has_interrupt(higher) != -1 ||
+		    kvm_test_request(KVM_REQ_HV_STIMER, higher))
+			return higher;
+	}
+	return NULL;
+}
+
+#ifdef CONFIG_KVM_HYPERV
+/*
+ * With userspace owning VTL transitions, report a pending higher-plane
+ * event as an exit so userspace can enter the higher VTL.  Returns true
+ * when the exit was prepared.
+ */
+static bool kvm_hv_vtl_interrupt_exit(struct kvm_vcpu *vcpu)
+{
+	struct kvm_vcpu *higher;
+
+	if (to_kvm_hv(vcpu->kvm)->hv_inkernel_vtl_switch)
+		return false;
+
+	higher = kvm_higher_plane_with_event(vcpu);
+	if (!higher)
+		return false;
+
+	trace_printk("vsm-vtlexit: vcpu%d plane%d -> plane%d\n",
+		     vcpu->vcpu_idx, vcpu->plane_level, higher->plane_level);
+	vcpu->run->exit_reason = KVM_EXIT_HYPERV;
+	vcpu->run->hyperv.type = KVM_EXIT_HYPERV_VTL_INTERRUPT;
+	vcpu->run->hyperv.plane = higher->plane_level;
+	return true;
+}
+#endif
+
 static inline bool kvm_check_plane0_events(struct kvm_vcpu *vcpu)
 {
 	struct kvm_vcpu *vcpu_plane0;
@@ -11555,6 +11737,22 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 		kvm_make_request(KVM_REQ_PLANE_RESCHED, vcpu);
 	}
 
+#ifdef CONFIG_KVM_HYPERV
+	if (kvm_hv_vtl_interrupt_exit(vcpu)) {
+		r = 0;
+		goto out;
+	}
+
+	if (to_kvm_hv(vcpu->kvm)->hv_inkernel_vtl_switch) {
+		struct kvm_vcpu *higher = kvm_higher_plane_with_event(vcpu);
+
+		if (higher && kvm_hv_vtl_interrupt_entry(vcpu, higher)) {
+			kvm_make_request(KVM_REQ_EVENT, higher);
+			kvm_make_request(KVM_REQ_PLANE_RESCHED, vcpu);
+		}
+	}
+#endif
+
 	if (kvm_check_request(KVM_REQ_PLANE_RESCHED, vcpu)) {
 		vcpu->common->plane_switch = true;
 		r = 0;
@@ -11904,7 +12102,8 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_vcpu_has_events);
 int kvm_arch_vcpu_runnable(struct kvm_vcpu *vcpu)
 {
 	return kvm_vcpu_running(vcpu) || vcpu->arch.pv.pv_unhalted ||
-	       kvm_vcpu_has_events(vcpu);
+	       kvm_vcpu_has_events(vcpu) ||
+	       kvm_higher_plane_with_event(vcpu);
 }
 
 /* Called within kvm->srcu read side.  */
@@ -11998,6 +12197,17 @@ static int vcpu_run(struct kvm_vcpu *vcpu)
 
 		if (r <= 0)
 			break;
+
+#ifdef CONFIG_KVM_HYPERV
+		/*
+		 * A halted lower VTL never reaches vcpu_enter_guest, but a
+		 * pending higher-VTL event must still preempt it.
+		 */
+		if (!kvm_vcpu_running(vcpu) && kvm_hv_vtl_interrupt_exit(vcpu)) {
+			r = 0;
+			break;
+		}
+#endif
 
 		kvm_clear_request(KVM_REQ_UNBLOCK, vcpu);
 		if (kvm_xen_has_pending_events(vcpu))
@@ -12759,6 +12969,10 @@ static bool kvm_is_valid_sregs(struct kvm_vcpu *vcpu, struct kvm_sregs *sregs)
 static int __set_sregs_common(struct kvm_vcpu *vcpu, struct kvm_sregs *sregs,
 		int *mmu_reset_needed, bool update_pdptrs)
 {
+	trace_printk("vsm-sregs: vcpu%d plane%d idt=%llx/%x cr3=%llx rip-now=%lx\n",
+		 vcpu->vcpu_idx, vcpu->plane_level,
+		 sregs->idt.base, (unsigned)sregs->idt.limit, sregs->cr3,
+		 kvm_rip_read(vcpu));
 	int idx;
 	struct desc_ptr dt;
 

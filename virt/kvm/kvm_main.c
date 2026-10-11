@@ -5054,6 +5054,10 @@ out_free1:
 		r = -EINVAL;
 		if (state > KVM_PLANE_RUN_STATE_RUNNABLE)
 			goto out;
+		trace_printk("vsm-runstate: vcpu%d plane%d -> %s\n",
+			     vcpu->vcpu_idx, vcpu->plane_level,
+			     state == KVM_PLANE_RUN_STATE_RUNNABLE ?
+			     "RUNNABLE" : "STOPPED");
 		if (state == KVM_PLANE_RUN_STATE_RUNNABLE) {
 			vcpu->plane_user_stopped = false;
 			kvm_vcpu_set_plane_runnable(vcpu);

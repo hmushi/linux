@@ -733,6 +733,21 @@ struct kvm_vcpu_hv {
 	} nested;
 
 	/*
+	 * HvRegisterCrInterceptControl value the higher VTL armed for the
+	 * lower VTL (userspace VSM): descriptor-table write bits divert
+	 * the emulated write into a KVM_EXIT_HYPERV_REG_INTERCEPT exit.
+	 */
+	u64 reg_intercept_control;
+	struct {
+		u32 reg;
+		u8 insn_len;
+		bool pending;
+		u64 base;
+		u32 limit;
+		u64 rip;
+	} reg_intercept;
+
+	/*
 	 * RAX/RCX of the lower VTL captured at VTL entry, restored on a
 	 * non-fast VTL return when this plane has no VP assist page to
 	 * carry them in its VTL control area.
