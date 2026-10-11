@@ -1432,6 +1432,13 @@ enum kvm_apicv_inhibit {
 	 */
 	APICV_INHIBIT_REASON_PHYSICAL_ID_TOO_BIG,
 
+	/*
+	 * APICv is inhibited when the VM has multiple planes (Hyper-V VTLs).
+	 * Cross-plane event delivery relies on software injection; hardware
+	 * acceleration on one twin would bypass it.
+	 */
+	APICV_INHIBIT_REASON_PLANES,
+
 	NR_APICV_INHIBIT_REASONS,
 };
 
@@ -1451,7 +1458,8 @@ enum kvm_apicv_inhibit {
 	__APICV_INHIBIT_REASON(PIT_REINJ),		\
 	__APICV_INHIBIT_REASON(SEV),			\
 	__APICV_INHIBIT_REASON(LOGICAL_ID_ALIASED),	\
-	__APICV_INHIBIT_REASON(PHYSICAL_ID_TOO_BIG)
+	__APICV_INHIBIT_REASON(PHYSICAL_ID_TOO_BIG),	\
+	__APICV_INHIBIT_REASON(PLANES)
 
 struct kvm_possible_nx_huge_pages {
 	/*
