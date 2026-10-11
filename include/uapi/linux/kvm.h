@@ -480,9 +480,15 @@ struct kvm_run {
 #define KVM_MEMORY_EXIT_FLAG_WRITE      (1ULL << 1)
 #define KVM_MEMORY_EXIT_FLAG_EXEC       (1ULL << 2)
 #define KVM_MEMORY_EXIT_FLAG_PRIVATE	(1ULL << 3)
+#define KVM_MEMORY_EXIT_FLAG_GVA_VALID	(1ULL << 4)
 			__u64 flags;
 			__u64 gpa;
 			__u64 size;
+			/* set on plane-protection faults when available */
+			__u64 gva;
+			__u32 insn_len;
+			__u8  insn_bytes[16];
+			__u32 pad;
 		} memory_fault;
 		/* KVM_EXIT_TDX */
 		struct {
@@ -1038,6 +1044,7 @@ struct kvm_enable_cap {
 #define KVM_CAP_HCALL_FAULT_EXIT 252
 #define KVM_CAP_HYPERV_VTL_SWITCH 253
 #define KVM_CAP_HYPERV_REG_INTERCEPT 254
+#define KVM_CAP_PLANE_MEMORY_OVERLAYS 257
 
 struct kvm_irq_routing_irqchip {
 	__u32 irqchip;
@@ -1394,6 +1401,16 @@ struct kvm_s390_keyop {
 #define KVM_CREATE_PLANE	  _IO(KVMIO, 0xe4)
 #define KVM_GET_PLANE_RUN_STATE	  _IOR(KVMIO, 0xe5, __u32)
 #define KVM_SET_PLANE_RUN_STATE	  _IOW(KVMIO, 0xe6, __u32)
+
+/* Map one page of userspace memory over a GPA for a single plane (VSM
+ * overlay pages: SynIC SIMP/SIEFP, hypercall page, VP assist page). */
+struct kvm_plane_memory_overlay {
+	__u32 plane;
+	__u32 flags;
+	__u64 gfn;
+	__u64 uaddr;		/* page-aligned; 0 removes the overlay */
+};
+#define KVM_SET_PLANE_MEMORY_OVERLAY	  _IOW(KVMIO, 0xe7, struct kvm_plane_memory_overlay)
 #define   KVM_PLANE_RUN_STATE_STOPPED	0
 #define   KVM_PLANE_RUN_STATE_RUNNABLE	1
 

@@ -4620,7 +4620,13 @@ static int kvm_mmu_faultin_pfn_gmem(struct kvm_vcpu *vcpu,
 	if (fault->slot->flags & KVM_MEM_READONLY)
 		fault->host_access &= ~ACC_WRITE_MASK;
 
-	fault->max_level = kvm_max_level_for_order(max_order);
+	/*
+	 * Only ever narrow max_level: the overlay check in
+	 * __kvm_mmu_faultin_pfn() may already have clamped it to 4K, and
+	 * a huge gmem mapping must not span an overlaid gfn.
+	 */
+	fault->max_level = min(fault->max_level,
+			       kvm_max_level_for_order(max_order));
 	return RET_PF_CONTINUE;
 }
 
@@ -4685,7 +4691,31 @@ static int __kvm_mmu_faultin_pfn(struct kvm_vcpu *vcpu,
 				 struct kvm_page_fault *fault)
 {
 	unsigned int foll = fault->write ? FOLL_WRITE : 0;
+	struct page *overlay;
 	bool writable;
+
+	/*
+	 * A plane overlay page (VSM SynIC SIMP/SIEFP etc.) replaces the
+	 * memslot translation for this plane only.  The page is pinned
+	 * for the overlay's lifetime, so no refcounting here.
+	 */
+	/*
+	 * Keep this plane's mappings at 4K while it has overlays: a huge
+	 * mapping established by a neighbouring gfn's fault would span the
+	 * overlaid gfn and bypass the override below.
+	 */
+	if (READ_ONCE(vcpu->plane->nr_overlays)) {
+		fault->max_level = PG_LEVEL_4K;
+
+		overlay = kvm_plane_overlay_page(vcpu->plane, fault->gfn);
+		if (overlay) {
+			trace_printk("vsm-ovl-fault: vcpu%d plane%d gfn=%llx\n",
+				     vcpu->vcpu_idx, vcpu->plane_level,
+				     fault->gfn);
+			fault->pfn = page_to_pfn(overlay);
+			return RET_PF_CONTINUE;
+		}
+	}
 
 	if (fault->is_private || kvm_memslot_is_gmem_only(fault->slot))
 		return kvm_mmu_faultin_pfn_gmem(vcpu, fault);
