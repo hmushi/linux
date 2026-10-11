@@ -247,6 +247,15 @@ static void synic_exit(struct kvm_vcpu_hv_synic *synic, u32 msr)
 	struct kvm_vcpu *vcpu = hv_synic_to_vcpu(synic);
 	struct kvm_vcpu_hv *hv_vcpu = to_hv_vcpu(vcpu);
 
+	/*
+	 * Userspace's SynIC device models plane 0 only; a higher plane's
+	 * exit would be mistaken for a plane-0 page move and relocate the
+	 * overlay the VMM keeps for SIMP/SIEFP.  Higher-plane SynICs are
+	 * handled fully in-kernel.
+	 */
+	if (vcpu->plane_level)
+		return;
+
 	hv_vcpu->exit.type = KVM_EXIT_HYPERV_SYNIC;
 	hv_vcpu->exit.u.synic.msr = msr;
 	hv_vcpu->exit.u.synic.control = synic->control;
@@ -294,6 +303,9 @@ static int synic_set_msr(struct kvm_vcpu_hv_synic *synic,
 			synic_exit(synic, msr);
 		break;
 	case HV_X64_MSR_SIMP:
+		if (vcpu->plane_level)
+			trace_printk("vsm-simp-set: vcpu%d plane%d data=%llx host=%d\n",
+				     vcpu->vcpu_idx, vcpu->plane_level, data, host);
 		if ((data & HV_SYNIC_SIMP_ENABLE) && !host &&
 		    !synic->dont_zero_synic_pages)
 			if (kvm_clear_guest(vcpu->kvm,
@@ -598,6 +610,27 @@ static void stimer_mark_pending(struct kvm_vcpu_hv_stimer *stimer,
 	kvm_make_request(KVM_REQ_HV_STIMER, vcpu);
 	if (vcpu_kick)
 		kvm_vcpu_kick(vcpu);
+
+	/*
+	 * A pending stimer on a suspended higher plane is only processed
+	 * once that plane runs; kick the lower twins so the running one
+	 * re-evaluates pending higher-plane events and forces entry.
+	 */
+	if (vcpu_kick && vcpu->plane_level) {
+		struct kvm_vcpu *twin;
+		int p;
+
+		for (p = 0; p < vcpu->plane_level; p++) {
+			twin = vcpu->common->vcpus[p];
+			if (twin) {
+				trace_printk("vsm-kick: vcpu%d plane%d stimer -> kick plane%d\n",
+					     vcpu->vcpu_idx,
+					     vcpu->plane_level, p);
+				kvm_make_request(KVM_REQ_UNBLOCK, twin);
+				kvm_vcpu_kick(twin);
+			}
+		}
+	}
 }
 
 static void stimer_cleanup(struct kvm_vcpu_hv_stimer *stimer)
@@ -784,6 +817,10 @@ static int synic_deliver_msg(struct kvm_vcpu_hv_synic *synic, u32 sint,
 		return r;
 
 	if (hv_hdr.message_type != HVMSG_NONE) {
+		if (vcpu->plane_level)
+			trace_printk("vsm-simp-busy: vcpu%d plane%d sint=%u msg_page=%llx slot_type=%x\n",
+				     vcpu->vcpu_idx, vcpu->plane_level, sint,
+				     synic->msg_page, hv_hdr.message_type);
 		if (no_retry)
 			return 0;
 

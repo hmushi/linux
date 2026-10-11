@@ -1244,11 +1244,21 @@ static bool __kvm_irq_delivery_to_apic_fast(struct kvm_plane *plane, struct kvm_
 	map = rcu_dereference(plane->arch.apic_map);
 
 	ret = kvm_apic_map_get_dest_lapic(plane, &src, irq, map, &dst, &bitmap);
+	if (irq->vector == 33)
+		trace_printk("vsm-fast: plane=%u src=%d/%d dst_id=%u ret=%d map=%px\n",
+			     plane->level,
+			     src ? src->vcpu->vcpu_idx : -1,
+			     src ? src->vcpu->plane_level : -1,
+			     irq->dest_id, ret, map);
 	if (ret) {
 		*r = 0;
 		for_each_set_bit(i, &bitmap, 16) {
 			if (!dst[i])
 				continue;
+			if (irq->vector == 33)
+				trace_printk("vsm-fast-dst: vcpu%d plane%d\n",
+					     dst[i]->vcpu->vcpu_idx,
+					     dst[i]->vcpu->plane_level);
 			*r += kvm_apic_set_irq(dst[i]->vcpu, irq, rtc_status);
 		}
 	}
@@ -1414,6 +1424,15 @@ static int __apic_accept_irq(struct kvm_lapic *apic, int delivery_mode,
 		if (unlikely(trig_mode && !level))
 			break;
 
+		if (vcpu->plane_level)
+			trace_printk("vsm-twin-irq: vcpu%d plane%d vec=%d en=%d spiv=%x tpr=%x ppr=%x apicv=%d\n",
+				     vcpu->vcpu_idx, vcpu->plane_level, vector,
+				     apic_enabled(apic),
+				     kvm_lapic_get_reg(apic, APIC_SPIV),
+				     kvm_lapic_get_reg(apic, APIC_TASKPRI),
+				     kvm_lapic_get_reg(apic, APIC_PROCPRI),
+				     vcpu->arch.apic->apicv_active);
+
 		/* FIXME add logic for vcpu on reset */
 		if (unlikely(!apic_enabled(apic)))
 			break;
@@ -1436,6 +1455,29 @@ static int __apic_accept_irq(struct kvm_lapic *apic, int delivery_mode,
 
 		kvm_x86_call(deliver_interrupt)(apic, delivery_mode,
 						trig_mode, vector);
+
+		/*
+		 * An interrupt for a higher plane must preempt a lower
+		 * plane running on the same vCPU: kicking only the (stopped)
+		 * target twin wakes a blocked sibling via the shared wait,
+		 * but a sibling executing in guest mode needs an explicit
+		 * kick to re-evaluate pending higher-plane events.
+		 */
+		if (vcpu->plane_level) {
+			struct kvm_vcpu *twin;
+			int p;
+
+			for (p = 0; p < vcpu->plane_level; p++) {
+				twin = vcpu->common->vcpus[p];
+				if (twin) {
+					trace_printk("vsm-kick: vcpu%d plane%d irq -> kick plane%d\n",
+						     vcpu->vcpu_idx,
+						     vcpu->plane_level, p);
+					kvm_make_request(KVM_REQ_UNBLOCK, twin);
+					kvm_vcpu_kick(twin);
+				}
+			}
+		}
 		break;
 
 	case APIC_DM_REMRD:
@@ -1648,6 +1690,9 @@ void kvm_apic_send_ipi(struct kvm_lapic *apic, u32 icr_low, u32 icr_high)
 	struct kvm_lapic_irq irq;
 
 	kvm_icr_to_lapic_irq(apic, icr_low, icr_high, &irq);
+	trace_printk("vsm-ipisrc: vcpu%d plane%d icr=%x:%x vec=%d dst=%u\n",
+		     apic->vcpu->vcpu_idx, apic->vcpu->plane_level,
+		     icr_high, icr_low, irq.vector, irq.dest_id);
 
 	trace_kvm_apic_ipi(icr_low, irq.dest_id);
 
@@ -2060,6 +2105,27 @@ static void apic_timer_expired(struct kvm_lapic *apic, bool from_timer_fn)
 	kvm_make_request(KVM_REQ_UNBLOCK, vcpu);
 	if (from_timer_fn)
 		kvm_vcpu_kick(vcpu);
+
+	/*
+	 * A pending timer on a suspended higher plane only gets injected
+	 * once that plane runs again; kick the lower twins so the running
+	 * one re-evaluates pending higher-plane events and forces entry.
+	 */
+	if (vcpu->plane_level) {
+		struct kvm_vcpu *twin;
+		int p;
+
+		for (p = 0; p < vcpu->plane_level; p++) {
+			twin = vcpu->common->vcpus[p];
+			if (twin) {
+				trace_printk("vsm-kick: vcpu%d plane%d timer -> kick plane%d\n",
+					     vcpu->vcpu_idx,
+					     vcpu->plane_level, p);
+				kvm_make_request(KVM_REQ_UNBLOCK, twin);
+				kvm_vcpu_kick(twin);
+			}
+		}
+	}
 }
 
 static void start_sw_tscdeadline(struct kvm_lapic *apic)
@@ -3107,7 +3173,13 @@ int kvm_create_lapic(struct kvm_vcpu *vcpu)
 	 * that vCPU creation is guaranteed to run with a deterministic value,
 	 * the request will ensure the vCPU gets the correct state before VM-Entry.
 	 */
-	if (enable_apicv) {
+	/*
+	 * Higher-plane twins are software-switched and mostly suspended;
+	 * hardware interrupt virtualization on them only leaves pending
+	 * vectors in the PIR where a suspended plane's state cannot be
+	 * reliably observed.  Keep them on the legacy delivery path.
+	 */
+	if (enable_apicv && !vcpu->plane_level) {
 		apic->apicv_active = true;
 		kvm_make_request(KVM_REQ_APICV_UPDATE, vcpu);
 	}

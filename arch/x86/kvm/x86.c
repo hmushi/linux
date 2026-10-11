@@ -11233,7 +11233,9 @@ static struct kvm_vcpu *kvm_higher_plane_with_event(struct kvm_vcpu *vcpu)
 		 */
 		if (kvm_cpu_has_extint(higher) ||
 		    kvm_apic_has_interrupt(higher) != -1 ||
-		    kvm_test_request(KVM_REQ_HV_STIMER, higher))
+		    kvm_test_request(KVM_REQ_HV_STIMER, higher) ||
+		    (higher->arch.apic &&
+		     atomic_read(&higher->arch.apic->lapic_timer.pending)))
 			return higher;
 	}
 	return NULL;
@@ -11253,8 +11255,16 @@ static bool kvm_hv_vtl_interrupt_exit(struct kvm_vcpu *vcpu)
 		return false;
 
 	higher = kvm_higher_plane_with_event(vcpu);
-	if (!higher)
+	if (!higher) {
+		struct kvm_vcpu *t = vcpu->plane_level + 1 < KVM_MAX_PLANES ?
+				     vcpu->common->vcpus[vcpu->plane_level + 1] : NULL;
+
+		if (t && t->arch.apic && t->arch.apic->irr_pending)
+			trace_printk("vsm-vtlexit-miss: vcpu%d twin irr_pending has_int=%d extint=%d\n",
+				     vcpu->vcpu_idx, kvm_apic_has_interrupt(t),
+				     kvm_cpu_has_extint(t));
 		return false;
+	}
 
 	trace_printk("vsm-vtlexit: vcpu%d plane%d -> plane%d\n",
 		     vcpu->vcpu_idx, vcpu->plane_level, higher->plane_level);
@@ -11345,8 +11355,12 @@ void __kvm_vcpu_update_apicv(struct kvm_vcpu *vcpu)
 	down_read(&vcpu->kvm->arch.apicv_update_lock);
 	preempt_disable();
 
-	/* Do not activate APICV when APIC is disabled */
+	/*
+	 * Do not activate APICV when APIC is disabled, nor on higher-plane
+	 * twins (see kvm_create_lapic).
+	 */
 	activate = kvm_vcpu_apicv_activated(vcpu) &&
+		   !vcpu->plane_level &&
 		   (kvm_get_apic_mode(vcpu) != LAPIC_MODE_DISABLED);
 
 	if (apic->apicv_active == activate)
@@ -12573,6 +12587,15 @@ out:
 		store_regs(vcpu);
 	post_kvm_run_save(vcpu);
 	kvm_vcpu_srcu_read_unlock(vcpu);
+
+	/*
+	 * A non-zero plane may stay suspended indefinitely after this run
+	 * ends, and its hv timer only counts in VMX non-root mode.  Hand
+	 * the lapic timer to the hrtimer so it keeps firing while the
+	 * plane is parked; firing is what forces re-entry into the plane.
+	 */
+	if (vcpu->plane_level && kvm_lapic_hv_timer_in_use(vcpu))
+		kvm_lapic_switch_to_sw_timer(vcpu);
 
 	kvm_sigset_deactivate(vcpu);
 	vcpu_put(vcpu);
