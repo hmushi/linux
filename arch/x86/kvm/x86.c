@@ -11344,21 +11344,32 @@ static struct kvm_vcpu *kvm_higher_plane_with_event(struct kvm_vcpu *vcpu)
 			continue;
 		/*
 		 * Forced entry is edge-triggered on the posting of an
-		 * event, not level-triggered on the target's IRR, matching
-		 * the reference host's apic_pending_vtls bitmap
-		 * (BrimstoneLinux x86.c:11924-11942): one entry attempt
-		 * per posted interrupt, via the hv_apic_event_pending
-		 * marker __apic_accept_irq sets.  A vector that stays
+		 * event, not level-triggered on the target's IRR: one
+		 * entry attempt per posted interrupt, via the
+		 * hv_apic_event_pending marker __apic_accept_irq sets.
+		 * The attempt is gated on deliverability (TLFS 15.9: an
+		 * interrupt the higher VTL's priority mask blocks is held
+		 * pending and the VTL does not switch).  A masked vector
+		 * holds its marker, so the entry fires if a VTL round
+		 * trip leaves the vector deliverable; the plane consumes
+		 * its own marker when it runs.  A vector that stays
 		 * latched after a refused attempt (no VP assist page yet)
-		 * or that was masked by the plane's TPR waits for the next
-		 * cooperative entry or the next posted event; scanning the
-		 * IRR here instead would replay it the moment the assist
-		 * page is re-enabled.  A pending synthetic-timer request
-		 * counts as well: it can only be processed (and its
-		 * interrupt delivered) once the higher plane runs, so it
-		 * would otherwise never fire while the plane is suspended.
+		 * waits for the next cooperative entry or the next posted
+		 * event; scanning the IRR here instead would replay it
+		 * the moment the assist page is re-enabled.  NMIs force
+		 * entry ungated (they are folded back to plane 0, so the
+		 * higher APIC carries nothing to gate on), and a pending
+		 * synthetic-timer request counts as well: it can only be
+		 * processed (and its interrupt delivered) once the higher
+		 * plane runs, so it would otherwise never fire while the
+		 * plane is suspended.
+		 *
+		 * The reference host forces entry even for a TPR-masked
+		 * vector; the suite's TPR test probes for both behaviours.
 		 */
-		if (READ_ONCE(higher->arch.hv_apic_event_pending) ||
+		if ((READ_ONCE(higher->arch.hv_apic_event_pending) &&
+		     higher->arch.apic && kvm_apic_has_interrupt(higher) >= 0) ||
+		    READ_ONCE(higher->arch.hv_nmi_event_pending) ||
 		    kvm_cpu_has_extint(higher) ||
 		    kvm_test_request(KVM_REQ_HV_STIMER, higher) ||
 		    kvm_test_request(KVM_REQ_NMI, higher) ||
@@ -11393,6 +11404,7 @@ static bool kvm_hv_vtl_interrupt_exit(struct kvm_vcpu *vcpu)
 		 * rather than re-triggering an exit storm.
 		 */
 		WRITE_ONCE(higher->arch.hv_apic_event_pending, false);
+		WRITE_ONCE(higher->arch.hv_nmi_event_pending, false);
 	}
 	if (!higher) {
 		struct kvm_vcpu *t = vcpu->plane_level + 1 < KVM_MAX_PLANES ?
@@ -11914,12 +11926,12 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 
 	/*
 	 * This plane is running and about to evaluate its events: its
-	 * pended-while-suspended marker is consumed.  The clear must come
+	 * pended-while-suspended markers are consumed.  The clear must come
 	 * after the VTL-exit and plane-reschedule bail-outs above: a run
-	 * aborted there never evaluates the pended event, and nothing
-	 * re-arms the marker for a TPR-masked vector.
+	 * aborted there never evaluates the pended event.
 	 */
 	WRITE_ONCE(vcpu->arch.hv_apic_event_pending, false);
+	WRITE_ONCE(vcpu->arch.hv_nmi_event_pending, false);
 
 	if (kvm_check_request(KVM_REQ_EVENT, vcpu) || req_int_win ||
 	    kvm_xen_has_interrupt(vcpu)) {
