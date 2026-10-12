@@ -1077,6 +1077,10 @@ static void vgic_v3_queue_sgi(struct kvm_vcpu *vcpu, u32 sgi, bool allow_group1)
 						    true);
 			WARN_RATELIMIT(err, "IRQ %d", irq->host_irq);
 			raw_spin_unlock_irqrestore(&irq->irq_lock, flags);
+			/* R6 gate-4: vPE doorbell may not wake a blocked (WFI,
+			 * non-resident) target when a vSGI is pended in HW; kick it. */
+			kvm_make_request(KVM_REQ_IRQ_PENDING, vcpu);
+			kvm_vcpu_kick(vcpu);
 		}
 	} else {
 		raw_spin_unlock_irqrestore(&irq->irq_lock, flags);

@@ -706,6 +706,8 @@ static int vgic_its_trigger_msi(struct kvm *kvm, struct vgic_its *its,
 		irq = vgic_add_lpi(kvm, fbintid, fbvcpu);
 		if (IS_ERR(irq))
 			return err;
+		pr_info_ratelimited("R6LPIFB inject intid=%u devid=%u eventid=%u (resolve err=%d)\n",
+				    fbintid, devid, eventid, err);
 		update_lpi_config(kvm, irq, NULL, true);
 		raw_spin_lock_irqsave(&irq->irq_lock, flags);
 		irq->pending_latch = true;
@@ -755,12 +757,14 @@ int vgic_its_inject_msi(struct kvm *kvm, struct kvm_msi *msi)
 	struct vgic_its *its;
 	int ret;
 
+	pr_info_ratelimited("R6INJMSI addr=0x%llx devid=%u data=%u flags=0x%x\n", ((u64)msi->address_hi << 32) | msi->address_lo, msi->devid, msi->data, msi->flags);
 
 	if (!vgic_its_inject_cached_translation(kvm, msi))
 		return 1;
 
 	its = vgic_msi_to_its(kvm, msi);
 	if (IS_ERR(its)) {
+		pr_info_ratelimited("R6INJMSI_NOITS err=%ld\n", PTR_ERR(its));
 		return PTR_ERR(its);
 	}
 
