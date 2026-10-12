@@ -6033,9 +6033,7 @@ static int handle_ept_violation(struct kvm_vcpu *vcpu)
 	 */
 	if (ret == -EFAULT &&
 	    vcpu->run->exit_reason == KVM_EXIT_MEMORY_FAULT &&
-	    (vcpu->run->memory_fault.flags & (KVM_MEMORY_EXIT_FLAG_READ |
-					      KVM_MEMORY_EXIT_FLAG_WRITE |
-					      KVM_MEMORY_EXIT_FLAG_EXEC))) {
+	    (vcpu->run->memory_fault.flags & KVM_MEMORY_EXIT_FLAG_PLANE_PROT)) {
 		unsigned int len;
 
 		if (exit_qualification & EPT_VIOLATION_GVA_IS_VALID) {

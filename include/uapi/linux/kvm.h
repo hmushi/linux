@@ -481,6 +481,8 @@ struct kvm_run {
 #define KVM_MEMORY_EXIT_FLAG_EXEC       (1ULL << 2)
 #define KVM_MEMORY_EXIT_FLAG_PRIVATE	(1ULL << 3)
 #define KVM_MEMORY_EXIT_FLAG_GVA_VALID	(1ULL << 4)
+/* The fault was caused by the vCPU's plane's memory protections. */
+#define KVM_MEMORY_EXIT_FLAG_PLANE_PROT	(1ULL << 5)
 			__u64 flags;
 			__u64 gpa;
 			__u64 size;
