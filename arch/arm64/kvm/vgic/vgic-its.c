@@ -690,8 +690,29 @@ static int vgic_its_trigger_msi(struct kvm *kvm, struct vgic_its *its,
 	int err;
 
 	err = vgic_its_resolve_lpi(kvm, its, devid, eventid, &irq);
-	if (err)
-		return err;
+	if (err) {
+		/*
+		 * R6: a Hyper-V identity-on (enlightened) guest allocates LPIs via
+		 * the redistributor + a hypervisor bitmap but never programs the
+		 * ITS, so resolve fails (-EBUSY: ITS disabled). Fall back to
+		 * injecting LPI (VGIC_MIN_LPI + eventid) directly so device
+		 * interrupts (NVMe) reach the enlightened guest.
+		 */
+		struct kvm_vcpu *fbvcpu = kvm_get_vcpu(kvm, 0);
+		u32 fbintid = VGIC_MIN_LPI + eventid;
+
+		if (!fbvcpu || !vgic_lpis_enabled(fbvcpu))
+			return err;
+		irq = vgic_add_lpi(kvm, fbintid, fbvcpu);
+		if (IS_ERR(irq))
+			return err;
+		update_lpi_config(kvm, irq, NULL, true);
+		raw_spin_lock_irqsave(&irq->irq_lock, flags);
+		irq->pending_latch = true;
+		vgic_queue_irq_unlock(kvm, irq, flags);
+		vgic_put_irq(kvm, irq);
+		return 0;
+	}
 
 	if (irq->hw)
 		return irq_set_irqchip_state(irq->host_irq,
@@ -734,12 +755,14 @@ int vgic_its_inject_msi(struct kvm *kvm, struct kvm_msi *msi)
 	struct vgic_its *its;
 	int ret;
 
+
 	if (!vgic_its_inject_cached_translation(kvm, msi))
 		return 1;
 
 	its = vgic_msi_to_its(kvm, msi);
-	if (IS_ERR(its))
+	if (IS_ERR(its)) {
 		return PTR_ERR(its);
+	}
 
 	mutex_lock(&its->its_lock);
 	ret = vgic_its_trigger_msi(kvm, its, msi->devid, msi->data);
