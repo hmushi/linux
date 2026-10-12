@@ -2795,6 +2795,21 @@ static int kvm_hv_hypercall_complete(struct kvm_vcpu *vcpu, u64 result)
 	return ret;
 }
 
+/*
+ * A hypercall whose completion was deferred (a userspace exit, or an
+ * in-kernel VTL switch suspending this plane) completes on the vCPU's next
+ * run.  The vCPU may have been moved in between: the higher VTL can rewrite
+ * the suspended plane's RIP through HvCallSetVpRegisters (on a hibernate
+ * resume the secure kernel points VTL0 at the continuation), and userspace
+ * applies that through KVM_SET_REGS.  Skipping an instruction there would
+ * land past the new RIP, so only skip when the vCPU still sits at the RIP
+ * recorded when the completion was armed.
+ */
+static bool kvm_hv_hypercall_moved(struct kvm_vcpu *vcpu)
+{
+	return !kvm_is_linear_rip(vcpu, to_hv_vcpu(vcpu)->hcall_exit_rip);
+}
+
 static int kvm_hv_hypercall_complete_userspace(struct kvm_vcpu *vcpu)
 {
 	u64 result = vcpu->run->hyperv.u.hcall.result;
@@ -2806,6 +2821,13 @@ static int kvm_hv_hypercall_complete_userspace(struct kvm_vcpu *vcpu)
 	 */
 	if (result & KVM_HV_HCALL_RESULT_RAISE_UD) {
 		kvm_queue_exception(vcpu, UD_VECTOR);
+		return 1;
+	}
+
+	if (!kvm_hv_vcpu_suspended(vcpu) && kvm_hv_hypercall_moved(vcpu)) {
+		trace_kvm_hv_hypercall_done(result);
+		kvm_hv_hypercall_set_result(vcpu, result);
+		++vcpu->stat.hypercalls;
 		return 1;
 	}
 
@@ -2950,6 +2972,7 @@ static int kvm_hv_hypercall_userspace_exit(struct kvm_vcpu *vcpu,
 	vcpu->run->hyperv.u.hcall.input = hc->param;
 	vcpu->run->hyperv.u.hcall.params[0] = hc->ingpa;
 	vcpu->run->hyperv.u.hcall.params[1] = hc->outgpa;
+	to_hv_vcpu(vcpu)->hcall_exit_rip = kvm_get_linear_rip(vcpu);
 	vcpu->arch.complete_userspace_io = kvm_hv_hypercall_complete_userspace;
 	return 0;
 }
@@ -3223,7 +3246,9 @@ static int kvm_hv_vtl_switch(struct kvm_vcpu *vcpu, bool is_return)
 	 * instruction skip and the resume RAX from the shared run struct,
 	 * exactly as when userspace drives the switch; until then its
 	 * suspended RIP stays at the vmcall, which the higher VTL can
-	 * observe (and rewrite) through HvCallGetVpRegisters.
+	 * observe (and rewrite) through HvCallGetVpRegisters.  A rewritten
+	 * RIP suppresses the deferred skip (kvm_hv_hypercall_moved()): the
+	 * plane resumes exactly where the higher VTL pointed it.
 	 *
 	 * The resume value is guest-derived in all three cases (the
 	 * caller's RAX on a call or a fast return, the control area on a
@@ -3250,6 +3275,7 @@ static int kvm_hv_vtl_switch(struct kvm_vcpu *vcpu, bool is_return)
 	 * Suspend the current plane in its uncompleted hypercall; the
 	 * switch back will provide its resume value the same way.
 	 */
+	to_hv_vcpu(vcpu)->hcall_exit_rip = kvm_get_linear_rip(vcpu);
 	vcpu->arch.complete_userspace_io = kvm_hv_hypercall_complete_userspace;
 
 	vcpu->plane_user_stopped = true;

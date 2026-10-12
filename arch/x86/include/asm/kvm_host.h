@@ -765,6 +765,14 @@ struct kvm_vcpu_hv {
 	u64 vtl_entry_rax;
 	u64 vtl_entry_rcx;
 
+	/*
+	 * Linear RIP of the hypercall instruction whose deferred
+	 * completion (userspace exit or in-kernel VTL switch suspension)
+	 * is pending; linear so that a CS.base change while the vCPU is
+	 * parked cannot alias the recorded offset.
+	 */
+	u64 hcall_exit_rip;
+
 	bool suspended;
 	int waiting_on;
 
