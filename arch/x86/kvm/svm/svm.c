@@ -2081,6 +2081,17 @@ static int npf_interception(struct kvm_vcpu *vcpu)
 	return rc;
 }
 
+static int desc_interception(struct kvm_vcpu *vcpu)
+{
+	/*
+	 * Descriptor-table write exits are armed only while a higher VTL
+	 * has register intercepts on them (reg_intercept_control); the
+	 * emulator diverts the write into a register-intercept exit via
+	 * hv_divert_dt_write() instead of applying it.
+	 */
+	return kvm_emulate_instruction(vcpu, 0);
+}
+
 static int db_interception(struct kvm_vcpu *vcpu)
 {
 	struct kvm_run *kvm_run = vcpu->run;
@@ -3362,6 +3373,10 @@ static int (*const svm_exit_handlers[])(struct kvm_vcpu *vcpu) = {
 	[SVM_EXIT_WRITE_CR3]			= cr_interception,
 	[SVM_EXIT_WRITE_CR4]			= cr_interception,
 	[SVM_EXIT_WRITE_CR8]			= cr8_write_interception,
+	[SVM_EXIT_IDTR_WRITE]			= desc_interception,
+	[SVM_EXIT_GDTR_WRITE]			= desc_interception,
+	[SVM_EXIT_LDTR_WRITE]			= desc_interception,
+	[SVM_EXIT_TR_WRITE]			= desc_interception,
 	[SVM_EXIT_READ_DR0]			= dr_interception,
 	[SVM_EXIT_READ_DR1]			= dr_interception,
 	[SVM_EXIT_READ_DR2]			= dr_interception,
@@ -4780,6 +4795,29 @@ static void svm_vcpu_after_set_cpuid(struct kvm_vcpu *vcpu)
 	 */
 	if (guest_cpuid_is_intel_compatible(vcpu))
 		guest_cpu_cap_clear(vcpu->common, X86_FEATURE_V_VMSAVE_VMLOAD);
+
+#ifdef CONFIG_KVM_HYPERV
+	/*
+	 * Trap descriptor-table loads while a higher VTL has register
+	 * intercepts armed on them (reg_intercept_control), and stop
+	 * trapping when they are disarmed; the emulator diverts a trapped
+	 * load into a register-intercept exit (hv_divert_dt_write()).
+	 * VMX arms the all-or-nothing SECONDARY_EXEC_DESC here; the SVM
+	 * intercepts are per-register but armed as a block to match, and
+	 * an exit the emulator does not divert applies the load normally.
+	 */
+	if (to_hv_vcpu(vcpu) && to_hv_vcpu(vcpu)->reg_intercept_control) {
+		svm_set_intercept(svm, INTERCEPT_LOAD_IDTR);
+		svm_set_intercept(svm, INTERCEPT_LOAD_GDTR);
+		svm_set_intercept(svm, INTERCEPT_LOAD_LDTR);
+		svm_set_intercept(svm, INTERCEPT_LOAD_TR);
+	} else {
+		svm_clr_intercept(svm, INTERCEPT_LOAD_IDTR);
+		svm_clr_intercept(svm, INTERCEPT_LOAD_GDTR);
+		svm_clr_intercept(svm, INTERCEPT_LOAD_LDTR);
+		svm_clr_intercept(svm, INTERCEPT_LOAD_TR);
+	}
+#endif
 
 	if (is_sev_guest(vcpu))
 		sev_vcpu_after_set_cpuid(svm);
