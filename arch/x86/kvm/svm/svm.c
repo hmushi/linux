@@ -2042,7 +2042,7 @@ static int npf_interception(struct kvm_vcpu *vcpu)
 		}
 
 		vcpu->run->memory_fault.insn_len = len;
-		if (len)
+		if (len) {
 			/*
 			 * Copy from the decoder's fetch cache, not from the
 			 * VMCB window: the decoder fetches any bytes beyond
@@ -2053,6 +2053,9 @@ static int npf_interception(struct kvm_vcpu *vcpu)
 			 */
 			memcpy(vcpu->run->memory_fault.insn_bytes,
 			       vcpu->arch.emulate_ctxt->fetch.data, len);
+			vcpu->run->memory_fault.flags |=
+				KVM_MEMORY_EXIT_FLAG_INSN_VALID;
+		}
 
 		/*
 		 * The reflected fault is delivered to the higher VTL like an
