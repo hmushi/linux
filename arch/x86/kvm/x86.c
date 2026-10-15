@@ -11447,9 +11447,16 @@ static bool kvm_hv_vtl_interrupt_exit(struct kvm_vcpu *vcpu)
 	 * Single-shot, as in the reference host: if userspace refuses
 	 * the entry (e.g. the target VTL has no VP assist page yet),
 	 * the event waits in the target's IRR for a cooperative entry
-	 * rather than re-triggering an exit storm.
+	 * rather than re-triggering an exit storm.  Each marker is
+	 * consumed only by its own approved attempt: when this exit was
+	 * triggered by another clause (extint, stimer, timer) while the
+	 * posted vector is still masked, the APIC marker stays armed so
+	 * a VTL round trip that unmasks the vector can retrigger the
+	 * entry.
 	 */
-	WRITE_ONCE(higher->arch.hv_apic_event_pending, false);
+	if (READ_ONCE(higher->arch.hv_apic_event_pending) &&
+	    higher->arch.apic && kvm_apic_has_interrupt(higher) >= 0)
+		WRITE_ONCE(higher->arch.hv_apic_event_pending, false);
 	WRITE_ONCE(higher->arch.hv_nmi_event_pending, false);
 
 	vcpu->run->exit_reason = KVM_EXIT_HYPERV;
@@ -12003,10 +12010,15 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 				 * the markers rather than repeating the
 				 * failing guest write on every exit.  The
 				 * event stays latched in the plane's own
-				 * pending state for its next entry.
+				 * pending state for its next entry.  A
+				 * still-masked vector keeps its marker; only
+				 * its own approved attempt consumes it.
 				 */
-				WRITE_ONCE(higher->arch.hv_apic_event_pending,
-					   false);
+				if (READ_ONCE(higher->arch.hv_apic_event_pending) &&
+				    higher->arch.apic &&
+				    kvm_apic_has_interrupt(higher) >= 0)
+					WRITE_ONCE(higher->arch.hv_apic_event_pending,
+						   false);
 				WRITE_ONCE(higher->arch.hv_nmi_event_pending,
 					   false);
 			}
