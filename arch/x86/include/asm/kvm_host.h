@@ -762,10 +762,14 @@ struct kvm_vcpu_hv {
 	/*
 	 * RAX/RCX of the lower VTL captured at VTL entry, restored on a
 	 * non-fast VTL return when this plane has no VP assist page to
-	 * carry them in its VTL control area.
+	 * carry them in its VTL control area.  Only valid between an
+	 * in-kernel VTL entry and the matching return: a plane entered by
+	 * userspace, or restored from migration, has no captured values
+	 * and its assist-less return is forwarded to userspace.
 	 */
 	u64 vtl_entry_rax;
 	u64 vtl_entry_rcx;
+	bool vtl_entry_regs_valid;
 
 	/*
 	 * Linear RIP of the hypercall instruction whose deferred

@@ -3211,6 +3211,7 @@ bool kvm_hv_vtl_interrupt_entry(struct kvm_vcpu *vcpu,
 	if (to_hv_vcpu(target)) {
 		to_hv_vcpu(target)->vtl_entry_rax = rax;
 		to_hv_vcpu(target)->vtl_entry_rcx = rcx;
+		to_hv_vcpu(target)->vtl_entry_regs_valid = true;
 	}
 
 	/*
@@ -3304,6 +3305,15 @@ static int kvm_hv_vtl_switch(struct kvm_vcpu *vcpu, bool is_return)
 						&ctl, sizeof(ctl)))
 				return -ENOENT;
 		} else {
+			/*
+			 * No captured entry registers to restore: this plane
+			 * was last entered by userspace (or the capture was
+			 * lost across migration).  Forward the return so
+			 * userspace restores the lower VTL's RAX/RCX itself.
+			 */
+			if (!to_hv_vcpu(vcpu)->vtl_entry_regs_valid)
+				return -ENOENT;
+
 			ctl.vtl_ret_x64rax = to_hv_vcpu(vcpu)->vtl_entry_rax;
 			ctl.vtl_ret_x64rcx = to_hv_vcpu(vcpu)->vtl_entry_rcx;
 		}
@@ -3342,12 +3352,14 @@ static int kvm_hv_vtl_switch(struct kvm_vcpu *vcpu, bool is_return)
 		if (to_hv_vcpu(target)) {
 			to_hv_vcpu(target)->vtl_entry_rax = rax;
 			to_hv_vcpu(target)->vtl_entry_rcx = rcx;
+			to_hv_vcpu(target)->vtl_entry_regs_valid = true;
 		}
 		resume = rax;
 	} else {
 		if (!fast)
 			kvm_rcx_write(target, ctl.vtl_ret_x64rcx);
 		resume = fast ? rax : ctl.vtl_ret_x64rax;
+		to_hv_vcpu(vcpu)->vtl_entry_regs_valid = false;
 	}
 
 	/*
