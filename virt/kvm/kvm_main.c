@@ -5274,7 +5274,12 @@ static int kvm_vm_ioctl_check_extension_generic(struct kvm *kvm, long arg)
 	case KVM_CAP_PLANES:
 		if (kvm)
 			return kvm_arch_max_planes(kvm);
-		return 1;
+		/*
+		 * The system fd reports the ceiling a VM may opt in to via
+		 * KVM_ENABLE_CAP(KVM_CAP_PLANES); a VM fd reports what the
+		 * VM actually has.
+		 */
+		return KVM_MAX_PLANES;
 	default:
 		break;
 	}
@@ -5486,6 +5491,13 @@ static int kvm_vm_ioctl_create_plane(struct kvm *kvm, unsigned id)
 	struct file *file;
 	int r, fd;
 
+	guard(mutex)(&kvm->lock);
+
+	/*
+	 * Check the limit under kvm->lock, where KVM_ENABLE_CAP sets it,
+	 * so a concurrent cap enable cannot change it between this check
+	 * and the installation below.
+	 */
 	if (id >= kvm_arch_max_planes(kvm) ||
 	    WARN_ON_ONCE(id >= KVM_MAX_PLANES))
 		return -EINVAL;
@@ -5494,7 +5506,6 @@ static int kvm_vm_ioctl_create_plane(struct kvm *kvm, unsigned id)
 	if (!kvm_arch_irqchip_in_kernel(kvm))
 		return -EINVAL;
 
-	guard(mutex)(&kvm->lock);
 	if (kvm->planes[id])
 		return -EEXIST;
 
