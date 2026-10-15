@@ -2836,6 +2836,8 @@ bool kvm_plane_range_has_any_attrs(struct kvm_plane *plane, gfn_t start,
 				   gfn_t end);
 bool kvm_range_has_any_memory_attributes(struct kvm *kvm, gfn_t start, gfn_t end,
 					unsigned long mask);
+bool kvm_any_plane_range_has_rw_memory_protections(struct kvm *kvm,
+						   gfn_t start, gfn_t end);
 bool kvm_arch_pre_set_memory_attributes(struct kvm *kvm,
 					struct kvm_gfn_range *range);
 bool kvm_arch_post_set_memory_attributes(struct kvm *kvm,
@@ -2876,6 +2878,12 @@ static inline unsigned long kvm_get_memory_attributes(struct kvm *kvm, gfn_t gfn
 static inline bool kvm_range_has_any_memory_attributes(struct kvm *kvm,
 						       gfn_t start, gfn_t end,
 						       unsigned long mask)
+{
+	return false;
+}
+static inline bool kvm_any_plane_range_has_rw_memory_protections(struct kvm *kvm,
+								 gfn_t start,
+								 gfn_t end)
 {
 	return false;
 }
