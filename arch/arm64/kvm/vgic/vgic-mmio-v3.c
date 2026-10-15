@@ -576,6 +576,15 @@ static void vgic_mmio_write_invlpi(struct kvm_vcpu *vcpu,
 	if (intid < VGIC_MIN_LPI)
 		return;
 
+	/*
+	 * Without an ITS the guest binds a device LPI to a VP by configuring it
+	 * on that VP's redistributor. Record the owner so the no-ITS MSI
+	 * fallback in vgic_its_trigger_msi() targets that VP.
+	 */
+	if (intid - VGIC_MIN_LPI < 64)
+		vcpu->kvm->arch.vgic.r6_lpi_rdist[intid - VGIC_MIN_LPI] =
+			vcpu->vcpu_id + 1;
+
 	vgic_set_rdist_busy(vcpu, true);
 
 	irq = vgic_get_irq(vcpu->kvm, intid);

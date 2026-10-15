@@ -28,15 +28,6 @@ static struct kvm_device_ops kvm_arm_vgic_its_ops;
 static int vgic_its_save_tables_v0(struct vgic_its *its);
 static int vgic_its_restore_tables_v0(struct vgic_its *its);
 static void vgic_its_commit_v0(struct vgic_its *its);
-/* R4a: NVMe-LPI bring-up race window (ms). A device LPI targeted at an AP
- * (vcpu_id != 0) is dropped for this long after the first device-LPI fallback:
- * the enlightened guest enables+targets the queue (INVLPIR) before connecting
- * its ISR, and delivering in that gap bugchecks the AP (0x12). NVMe CQ entries
- * persist in memory and drain on the next interrupt once the ISR is connected.
- * Tunable at runtime: /sys/module/kvm/parameters/r6_hold_ms. 0 disables. */
-static unsigned int r6_hold_ms = 30000;
-module_param(r6_hold_ms, uint, 0644);
-
 static int update_lpi_config(struct kvm *kvm, struct vgic_irq *irq,
 			     struct kvm_vcpu *filter_vcpu, bool needs_inv);
 
@@ -716,27 +707,19 @@ static int vgic_its_trigger_msi(struct kvm *kvm, struct vgic_its *its,
 
 		if (!fbvcpu || !vgic_lpis_enabled(fbvcpu))
 			return err;
-		if (!kvm->arch.vgic.r6_window_start)
-			kvm->arch.vgic.r6_window_start = ktime_get_ns();
-		if (fbvcpu->vcpu_id != 0 && r6_hold_ms &&
-		    ktime_get_ns() - kvm->arch.vgic.r6_window_start <
-		        (u64)r6_hold_ms * NSEC_PER_MSEC) {
-			pr_info_ratelimited("R6HOLD ev=%u -> vcpu=%d dropped (bringup window)\n",
-					    eventid, fbvcpu->vcpu_id);
-			return 0;
-		}
 		irq = vgic_add_lpi(kvm, fbintid, fbvcpu);
 		if (IS_ERR(irq))
 			return err;
-		pr_info_ratelimited("R6LPIFB inject intid=%u devid=%u eventid=%u (resolve err=%d)\n",
-				    fbintid, devid, eventid, err);
+		/*
+		 * vgic_add_lpi() returns an existing irq without updating its
+		 * target, and update_lpi_config() presents the irq on its current
+		 * target_vcpu, so retarget first or a stale target is used.
+		 */
+		raw_spin_lock_irqsave(&irq->irq_lock, flags);
+		irq->target_vcpu = fbvcpu;
+		raw_spin_unlock_irqrestore(&irq->irq_lock, flags);
 		update_lpi_config(kvm, irq, NULL, true);
 		raw_spin_lock_irqsave(&irq->irq_lock, flags);
-		/* R6: vgic_add_lpi returns an existing irq without updating its target,
-		 * so an irq first created before the INVLPIR recording keeps a stale VP0
-		 * target. Retarget to the recorded owner before queueing. */
-		if (irq->target_vcpu != fbvcpu)
-			irq->target_vcpu = fbvcpu;
 		irq->pending_latch = true;
 		vgic_queue_irq_unlock(kvm, irq, flags);
 		vgic_put_irq(kvm, irq);
