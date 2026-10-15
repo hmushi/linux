@@ -295,9 +295,6 @@ static int synic_set_msr(struct kvm_vcpu_hv_synic *synic,
 			synic_exit(synic, msr);
 		break;
 	case HV_X64_MSR_SIMP:
-		if (vcpu->plane_level)
-			trace_printk("vsm-simp-set: vcpu%d plane%d data=%llx host=%d\n",
-				     vcpu->vcpu_idx, vcpu->plane_level, data, host);
 		if ((data & HV_SYNIC_SIMP_ENABLE) && !host &&
 		    !synic->dont_zero_synic_pages)
 			if (kvm_clear_guest(vcpu->kvm,
@@ -617,9 +614,6 @@ static void stimer_mark_pending(struct kvm_vcpu_hv_stimer *stimer,
 		for (p = 0; p < vcpu->plane_level; p++) {
 			twin = vcpu->common->vcpus[p];
 			if (twin) {
-				trace_printk("vsm-kick: vcpu%d plane%d stimer -> kick plane%d\n",
-					     vcpu->vcpu_idx,
-					     vcpu->plane_level, p);
 				kvm_make_request(KVM_REQ_UNBLOCK, twin);
 				kvm_vcpu_kick(twin);
 			}
@@ -856,10 +850,6 @@ static int synic_deliver_msg(struct kvm_vcpu_hv_synic *synic, u32 sint,
 		return r;
 
 	if (hv_hdr.message_type != HVMSG_NONE) {
-		if (vcpu->plane_level)
-			trace_printk("vsm-simp-busy: vcpu%d plane%d sint=%u msg_page=%llx slot_type=%x\n",
-				     vcpu->vcpu_idx, vcpu->plane_level, sint,
-				     synic->msg_page, hv_hdr.message_type);
 		if (no_retry)
 			return 0;
 
@@ -2700,10 +2690,6 @@ check_and_send_ipi:
 		target_plane = vcpu->plane_level;
 	}
 
-	trace_printk("vsm-ipi: vcpu%d plane%d vec=%x target_plane=%d banks=%llx\n",
-		     vcpu->vcpu_idx, vcpu->plane_level, vector, target_plane,
-		     sparse_banks ? sparse_banks[0] : ~0ULL);
-
 	if (all_cpus)
 		kvm_hv_send_ipi_to_many(kvm, vector, NULL, 0, target_plane);
 	else
@@ -3079,15 +3065,6 @@ bool kvm_hv_vtl_interrupt_entry(struct kvm_vcpu *vcpu,
 		return false;
 
 	/*
-	 * No kvm_rip_read(target) here: with the source's VMCS loaded a
-	 * VMX register-cache miss would fill the suspended target's RIP
-	 * from the wrong VMCS and mark it available.
-	 */
-	trace_printk("vsm-vina: vcpu%d %d->%d rip=%lx\n",
-		     vcpu->vcpu_idx, vcpu->plane_level, target->plane_level,
-		     kvm_rip_read(vcpu));
-
-	/*
 	 * The hcall.result write below assumes the target's armed
 	 * completion is the hypercall one.  Any other pending completion
 	 * (MMIO, PIO) owns the shared run union and must consume it
@@ -3193,15 +3170,6 @@ static int kvm_hv_vtl_switch(struct kvm_vcpu *vcpu, bool is_return)
 	 */
 	if (!is_return && target->arch.last_vmentry_cpu == -1)
 		return -ENOENT;
-
-	/*
-	 * No kvm_rip_read(target) here: with the source's VMCS loaded a
-	 * VMX register-cache miss would fill the suspended target's RIP
-	 * from the wrong VMCS and mark it available.
-	 */
-	trace_printk("vsm-sw: vcpu%d %d->%d rip=%lx rax=%llx cui=%d\n",
-		     vcpu->vcpu_idx, cur, to, kvm_rip_read(vcpu), rax,
-		     target->arch.complete_userspace_io != NULL);
 
 	/*
 	 * Debug budget on in-kernel switches, counted per VM and only for

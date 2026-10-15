@@ -892,9 +892,6 @@ static u32 vmx_read_guest_seg_ar(struct vcpu_vmx *vmx, unsigned seg)
 	return *p;
 }
 
-static bool __read_mostly vsm_trace_desc;
-module_param(vsm_trace_desc, bool, 0444);
-
 void vmx_update_exception_bitmap(struct kvm_vcpu *vcpu)
 {
 	u32 eb;
@@ -923,13 +920,6 @@ void vmx_update_exception_bitmap(struct kvm_vcpu *vcpu)
 		eb = ~0;
 	if (!vmx_need_pf_intercept(vcpu))
 		eb &= ~(1u << PF_VECTOR);
-
-	/* Debug: trap the first exception taken under a null guest IDT. */
-	if (vsm_trace_desc && !vmcs_read32(GUEST_IDTR_LIMIT))
-		eb |= (1u << GP_VECTOR) | (1u << PF_VECTOR) |
-		      (1u << DE_VECTOR) | (1u << NM_VECTOR) |
-		      (1u << DF_VECTOR) | (1u << SS_VECTOR) |
-		      (1u << NP_VECTOR);
 
 	/* When we are running a nested L2 guest and L1 specified for it a
 	 * certain exception bitmap, we must trap the same exceptions and pass
@@ -3758,12 +3748,6 @@ void vmx_get_idt(struct kvm_vcpu *vcpu, struct desc_ptr *dt)
 
 void vmx_set_idt(struct kvm_vcpu *vcpu, struct desc_ptr *dt)
 {
-	if (!dt->address)
-		trace_printk("vsm-idt0: vcpu%d plane%d idt=%lx/%x rip=%lx caller=%pS\n",
-			     vcpu->vcpu_idx, vcpu->plane_level,
-			     dt->address, (unsigned)dt->size,
-			     kvm_rip_read(vcpu),
-			     __builtin_return_address(0));
 	vmcs_write32(GUEST_IDTR_LIMIT, dt->size);
 	vmcs_writel(GUEST_IDTR_BASE, dt->address);
 }
@@ -5096,12 +5080,6 @@ void vmx_inject_irq(struct kvm_vcpu *vcpu, bool reinjected)
 	int irq = vcpu->arch.interrupt.nr;
 
 	trace_kvm_inj_virq(irq, vcpu->arch.interrupt.soft, reinjected);
-	if (vcpu->arch.apic)
-		trace_printk("vsm-inj: vcpu%d plane%d vec=%x tpr=%x vapic-vmcs=%llx vapic-real=%llx\n",
-			     vcpu->vcpu_idx, vcpu->plane_level, irq,
-			     kvm_lapic_get_reg(vcpu->arch.apic, APIC_TASKPRI),
-			     vmcs_read64(VIRTUAL_APIC_PAGE_ADDR),
-			     (u64)__pa(vcpu->arch.apic->regs));
 
 	++vcpu->stat.irq_injections;
 	if (vmx->rmode.vm86_active) {
@@ -5414,14 +5392,6 @@ static int handle_exception_nmi(struct kvm_vcpu *vcpu)
 	vect_info = vmx->idt_vectoring_info;
 	intr_info = vmx_get_intr_info(vcpu);
 
-	if (vsm_trace_desc && !vmcs_read32(GUEST_IDTR_LIMIT))
-		trace_printk("vsm-exc: vcpu%d plane%d intr=%x err=%x rip=%lx cr2=%lx qual=%lx vect=%x\n",
-			     vcpu->vcpu_idx, vcpu->plane_level, intr_info,
-			     (intr_info & INTR_INFO_DELIVER_CODE_MASK) ?
-			     vmcs_read32(VM_EXIT_INTR_ERROR_CODE) : 0,
-			     kvm_rip_read(vcpu), vcpu->arch.cr2,
-			     vmcs_readl(EXIT_QUALIFICATION), vect_info);
-
 	/*
 	 * Machine checks are handled by handle_exception_irqoff(), or by
 	 * vmx_vcpu_run() if a #MC occurs on VM-Entry.  NMIs are handled by
@@ -5583,21 +5553,6 @@ static __always_inline int handle_external_interrupt(struct kvm_vcpu *vcpu)
 
 static int handle_triple_fault(struct kvm_vcpu *vcpu)
 {
-	trace_printk("vsm-3f: triple fault vcpu%d plane%d rip=%lx cr3=%llx idt=%lx/%x gdt=%lx intrinfo=%x qual=%lx gm=%d vmcs=%s cr8=%lx tpr=%x ppr=%x\n",
-		     vcpu->vcpu_idx, vcpu->plane_level, kvm_rip_read(vcpu),
-		     kvm_read_cr3(vcpu),
-		     vmcs_readl(GUEST_IDTR_BASE), vmcs_read32(GUEST_IDTR_LIMIT),
-		     vmcs_readl(GUEST_GDTR_BASE),
-		     vmcs_read32(IDT_VECTORING_INFO_FIELD),
-		     vmcs_readl(EXIT_QUALIFICATION),
-		     is_guest_mode(vcpu),
-		     to_vmx(vcpu)->loaded_vmcs == &to_vmx(vcpu)->vmcs01 ?
-		     "vmcs01" : "OTHER",
-		     kvm_get_cr8(vcpu),
-		     vcpu->arch.apic ?
-		     kvm_lapic_get_reg(vcpu->arch.apic, APIC_TASKPRI) : 0,
-		     vcpu->arch.apic ?
-		     kvm_lapic_get_reg(vcpu->arch.apic, APIC_PROCPRI) : 0);
 	vcpu->run->exit_reason = KVM_EXIT_SHUTDOWN;
 	vcpu->mmio_needed = 0;
 	return 0;
@@ -5688,12 +5643,11 @@ static int handle_desc(struct kvm_vcpu *vcpu)
 
 	/*
 	 * Descriptor-table exits are also armed when a higher VTL registers
-	 * DT intercepts (reg_intercept_control) or for LIDT debug tracing;
-	 * only an exit with neither UMIP emulation nor an armed intercept
-	 * indicates a stale SECONDARY_EXEC_DESC control.
+	 * DT intercepts (reg_intercept_control); only an exit with neither
+	 * UMIP emulation nor an armed intercept indicates a stale
+	 * SECONDARY_EXEC_DESC control.
 	 */
 	WARN_ON_ONCE(!kvm_is_cr4_bit_set(vcpu, X86_CR4_UMIP) &&
-		     !vsm_trace_desc &&
 		     !(to_hv_vcpu(vcpu) && to_hv_vcpu(vcpu)->reg_intercept_control));
 	return kvm_emulate_instruction(vcpu, 0);
 }
@@ -8098,14 +8052,9 @@ void vmx_vcpu_after_set_cpuid(struct kvm_vcpu *vcpu)
 
 	vmx_setup_uret_msrs(vmx);
 
-	if (cpu_has_secondary_exec_ctrls()) {
+	if (cpu_has_secondary_exec_ctrls())
 		vmcs_set_secondary_exec_control(vmx,
 						vmx_secondary_exec_control(vmx));
-		trace_printk("vsm-sec: after-set vcpu%d plane%d want=%x live=%x\n",
-			     vcpu->vcpu_idx, vcpu->plane_level,
-			     vmx_secondary_exec_control(vmx),
-			     vmcs_read32(SECONDARY_VM_EXEC_CONTROL));
-	}
 
 	if (guest_cpu_cap_has(vcpu, X86_FEATURE_VMX))
 		vmx->msr_ia32_feature_control_valid_bits |=
@@ -8152,13 +8101,12 @@ void vmx_vcpu_after_set_cpuid(struct kvm_vcpu *vcpu)
 
 	/*
 	 * Trap descriptor-table instructions when a higher VTL armed
-	 * register intercepts on them (or for LIDT debug tracing), and
-	 * stop trapping when the intercepts are disarmed.  Preserve the
-	 * control when UMIP emulation needs it (CR4.UMIP owns it then).
+	 * register intercepts on them, and stop trapping when the
+	 * intercepts are disarmed.  Preserve the control when UMIP
+	 * emulation needs it (CR4.UMIP owns it then).
 	 */
 	if (vmcs_config.cpu_based_2nd_exec_ctrl & SECONDARY_EXEC_DESC) {
-		if (vsm_trace_desc ||
-		    (to_hv_vcpu(vcpu) && to_hv_vcpu(vcpu)->reg_intercept_control))
+		if (to_hv_vcpu(vcpu) && to_hv_vcpu(vcpu)->reg_intercept_control)
 			secondary_exec_controls_setbit(vmx, SECONDARY_EXEC_DESC);
 		else if (!(vmx_umip_emulated() &&
 			   kvm_is_cr4_bit_set(vcpu, X86_CR4_UMIP)))

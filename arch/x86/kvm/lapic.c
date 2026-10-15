@@ -1244,21 +1244,11 @@ static bool __kvm_irq_delivery_to_apic_fast(struct kvm_plane *plane, struct kvm_
 	map = rcu_dereference(plane->arch.apic_map);
 
 	ret = kvm_apic_map_get_dest_lapic(plane, &src, irq, map, &dst, &bitmap);
-	if (irq->vector == 33)
-		trace_printk("vsm-fast: plane=%u src=%d/%d dst_id=%u ret=%d map=%px\n",
-			     plane->level,
-			     src ? src->vcpu->vcpu_idx : -1,
-			     src ? src->vcpu->plane_level : -1,
-			     irq->dest_id, ret, map);
 	if (ret) {
 		*r = 0;
 		for_each_set_bit(i, &bitmap, 16) {
 			if (!dst[i])
 				continue;
-			if (irq->vector == 33)
-				trace_printk("vsm-fast-dst: vcpu%d plane%d\n",
-					     dst[i]->vcpu->vcpu_idx,
-					     dst[i]->vcpu->plane_level);
 			*r += kvm_apic_set_irq(dst[i]->vcpu, irq, rtc_status);
 		}
 	}
@@ -1424,15 +1414,6 @@ static int __apic_accept_irq(struct kvm_lapic *apic, int delivery_mode,
 		if (unlikely(trig_mode && !level))
 			break;
 
-		if (vcpu->plane_level)
-			trace_printk("vsm-twin-irq: vcpu%d plane%d vec=%d en=%d spiv=%x tpr=%x ppr=%x apicv=%d\n",
-				     vcpu->vcpu_idx, vcpu->plane_level, vector,
-				     apic_enabled(apic),
-				     kvm_lapic_get_reg(apic, APIC_SPIV),
-				     kvm_lapic_get_reg(apic, APIC_TASKPRI),
-				     kvm_lapic_get_reg(apic, APIC_PROCPRI),
-				     vcpu->arch.apic->apicv_active);
-
 		/* FIXME add logic for vcpu on reset */
 		if (unlikely(!apic_enabled(apic)))
 			break;
@@ -1471,9 +1452,6 @@ static int __apic_accept_irq(struct kvm_lapic *apic, int delivery_mode,
 			for (p = 0; p < vcpu->plane_level; p++) {
 				twin = vcpu->common->vcpus[p];
 				if (twin) {
-					trace_printk("vsm-kick: vcpu%d plane%d irq -> kick plane%d\n",
-						     vcpu->vcpu_idx,
-						     vcpu->plane_level, p);
 					kvm_make_request(KVM_REQ_UNBLOCK, twin);
 					kvm_vcpu_kick(twin);
 				}
@@ -1514,9 +1492,6 @@ static int __apic_accept_irq(struct kvm_lapic *apic, int delivery_mode,
 			for (p = 0; p < vcpu->plane_level; p++) {
 				twin = vcpu->common->vcpus[p];
 				if (twin) {
-					trace_printk("vsm-kick: vcpu%d plane%d nmi -> kick plane%d\n",
-						     vcpu->vcpu_idx,
-						     vcpu->plane_level, p);
 					kvm_make_request(KVM_REQ_UNBLOCK, twin);
 					kvm_vcpu_kick(twin);
 				}
@@ -1717,9 +1692,6 @@ void kvm_apic_send_ipi(struct kvm_lapic *apic, u32 icr_low, u32 icr_high)
 	struct kvm_lapic_irq irq;
 
 	kvm_icr_to_lapic_irq(apic, icr_low, icr_high, &irq);
-	trace_printk("vsm-ipisrc: vcpu%d plane%d icr=%x:%x vec=%d dst=%u\n",
-		     apic->vcpu->vcpu_idx, apic->vcpu->plane_level,
-		     icr_high, icr_low, irq.vector, irq.dest_id);
 
 	trace_kvm_apic_ipi(icr_low, irq.dest_id);
 
@@ -2145,9 +2117,6 @@ static void apic_timer_expired(struct kvm_lapic *apic, bool from_timer_fn)
 		for (p = 0; p < vcpu->plane_level; p++) {
 			twin = vcpu->common->vcpus[p];
 			if (twin) {
-				trace_printk("vsm-kick: vcpu%d plane%d timer -> kick plane%d\n",
-					     vcpu->vcpu_idx,
-					     vcpu->plane_level, p);
 				kvm_make_request(KVM_REQ_UNBLOCK, twin);
 				kvm_vcpu_kick(twin);
 			}

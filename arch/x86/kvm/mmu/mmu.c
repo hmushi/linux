@@ -4678,11 +4678,8 @@ static int kvm_faultin_memory_protections(struct kvm_vcpu *vcpu,
 		return RET_PF_CONTINUE;
 
 	trace_kvm_faultin_memory_protections(vcpu, fault, access);
-	if (__permission_fault(vcpu->arch.mmu, access, fault)) {
-		trace_printk("vsm-dbg: plane %u gfn %llx access %x exec %d\n",
-			     vcpu->plane_level, fault->gfn, access, fault->exec);
+	if (__permission_fault(vcpu->arch.mmu, access, fault))
 		return -EFAULT;
-	}
 
 	fault->host_access &= access;
 	return RET_PF_CONTINUE;
@@ -4710,9 +4707,6 @@ static int __kvm_mmu_faultin_pfn(struct kvm_vcpu *vcpu,
 
 		overlay = kvm_plane_overlay_page(vcpu->plane, fault->gfn);
 		if (overlay) {
-			trace_printk("vsm-ovl-fault: vcpu%d plane%d gfn=%llx\n",
-				     vcpu->vcpu_idx, vcpu->plane_level,
-				     fault->gfn);
 			fault->pfn = page_to_pfn(overlay);
 			return RET_PF_CONTINUE;
 		}
@@ -4798,10 +4792,6 @@ static int kvm_mmu_faultin_pfn(struct kvm_vcpu *vcpu,
 			vcpu->run->memory_fault.flags |= KVM_MEMORY_EXIT_FLAG_PLANE_PROT;
 		return -EFAULT;
 	}
-	if (fault->gfn == 0x1ae)
-		trace_printk("vsm-dbg2: gfn 1ae plane %u write %d host_access %x attrs %lx\n",
-			     vcpu->plane_level, fault->write, fault->host_access,
-			     kvm_plane_get_memory_attributes(vcpu->plane, fault->gfn));
 
 	/*
 	 * Retry the page fault if the gfn hit a memslot that is being deleted

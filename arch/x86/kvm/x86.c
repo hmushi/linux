@@ -959,10 +959,6 @@ static void kvm_multiple_exception(struct kvm_vcpu *vcpu, unsigned int nr,
 
 void kvm_queue_exception(struct kvm_vcpu *vcpu, unsigned nr)
 {
-	if (nr == UD_VECTOR && vcpu->plane_level)
-		trace_printk("vsm-ud: queue-ud vcpu%d plane%d rip=%lx\n",
-			     vcpu->vcpu_idx, vcpu->plane_level,
-			     kvm_rip_read(vcpu));
 	kvm_multiple_exception(vcpu, nr, false, 0, false, 0);
 }
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_queue_exception);
@@ -1052,10 +1048,6 @@ void kvm_inject_page_fault(struct kvm_vcpu *vcpu, struct x86_exception *fault)
 void kvm_inject_emulated_page_fault(struct kvm_vcpu *vcpu,
 				    struct x86_exception *fault)
 {
-	trace_printk("vsm-pf: vcpu%d plane%d cr2=%llx err=%x cr3=%llx\n",
-		     vcpu->vcpu_idx, vcpu->plane_level,
-		     fault->address, (unsigned)fault->error_code,
-		     kvm_read_cr3(vcpu));
 	struct kvm_mmu *fault_mmu;
 	WARN_ON_ONCE(fault->vector != PF_VECTOR);
 
@@ -2320,15 +2312,6 @@ EXPORT_SYMBOL_FOR_KVM_INTERNAL(handle_fastpath_invd);
 
 int kvm_handle_invalid_op(struct kvm_vcpu *vcpu)
 {
-	u32 reason, intr, err;
-	u64 i1, i2;
-
-	kvm_x86_call(get_exit_info)(vcpu, &reason, &i1, &i2, &intr, &err);
-	trace_printk("vsm-ud: invalid-op vcpu%d plane%d rip=%lx exit=%u rdseed-cap=%d rdrand-cap=%d\n",
-		     vcpu->vcpu_idx, vcpu->plane_level, kvm_rip_read(vcpu),
-		     reason,
-		     guest_cpu_cap_has(vcpu, X86_FEATURE_RDSEED),
-		     guest_cpu_cap_has(vcpu, X86_FEATURE_RDRAND));
 	kvm_queue_exception(vcpu, UD_VECTOR);
 	return 1;
 }
@@ -8986,10 +8969,6 @@ static bool hv_divert_dt_write(struct x86_emulate_ctxt *ctxt, u32 hv_reg,
 	hv_vcpu->reg_intercept.rip = ctxt->eip;
 	hv_vcpu->reg_intercept.insn_len = ctxt->_eip - ctxt->eip;
 	hv_vcpu->reg_intercept.pending = true;
-	trace_printk("vsm-regint: vcpu%d reg=%x base=%llx/%x rip=%llx len=%u\n",
-		     vcpu->vcpu_idx, hv_reg, hv_vcpu->reg_intercept.base,
-		     hv_vcpu->reg_intercept.limit, hv_vcpu->reg_intercept.rip,
-		     hv_vcpu->reg_intercept.insn_len);
 	return true;
 #else
 	return false;
@@ -11418,29 +11397,18 @@ static bool kvm_hv_vtl_interrupt_exit(struct kvm_vcpu *vcpu)
 		return false;
 
 	higher = kvm_higher_plane_with_event(vcpu);
-	if (higher) {
-		/*
-		 * Single-shot, as in the reference host: if userspace refuses
-		 * the entry (e.g. the target VTL has no VP assist page yet),
-		 * the event waits in the target's IRR for a cooperative entry
-		 * rather than re-triggering an exit storm.
-		 */
-		WRITE_ONCE(higher->arch.hv_apic_event_pending, false);
-		WRITE_ONCE(higher->arch.hv_nmi_event_pending, false);
-	}
-	if (!higher) {
-		struct kvm_vcpu *t = vcpu->plane_level + 1 < KVM_MAX_PLANES ?
-				     vcpu->common->vcpus[vcpu->plane_level + 1] : NULL;
-
-		if (t && t->arch.apic && t->arch.apic->irr_pending)
-			trace_printk("vsm-vtlexit-miss: vcpu%d twin irr_pending has_int=%d extint=%d\n",
-				     vcpu->vcpu_idx, kvm_apic_has_interrupt(t),
-				     kvm_cpu_has_extint(t));
+	if (!higher)
 		return false;
-	}
 
-	trace_printk("vsm-vtlexit: vcpu%d plane%d -> plane%d\n",
-		     vcpu->vcpu_idx, vcpu->plane_level, higher->plane_level);
+	/*
+	 * Single-shot, as in the reference host: if userspace refuses
+	 * the entry (e.g. the target VTL has no VP assist page yet),
+	 * the event waits in the target's IRR for a cooperative entry
+	 * rather than re-triggering an exit storm.
+	 */
+	WRITE_ONCE(higher->arch.hv_apic_event_pending, false);
+	WRITE_ONCE(higher->arch.hv_nmi_event_pending, false);
+
 	vcpu->run->exit_reason = KVM_EXIT_HYPERV;
 	vcpu->run->hyperv.type = KVM_EXIT_HYPERV_VTL_INTERRUPT;
 	vcpu->run->hyperv.plane = higher->plane_level;
@@ -13230,10 +13198,6 @@ static bool kvm_is_valid_sregs(struct kvm_vcpu *vcpu, struct kvm_sregs *sregs)
 static int __set_sregs_common(struct kvm_vcpu *vcpu, struct kvm_sregs *sregs,
 		int *mmu_reset_needed, bool update_pdptrs)
 {
-	trace_printk("vsm-sregs: vcpu%d plane%d idt=%llx/%x cr3=%llx rip-now=%lx\n",
-		 vcpu->vcpu_idx, vcpu->plane_level,
-		 sregs->idt.base, (unsigned)sregs->idt.limit, sregs->cr3,
-		 kvm_rip_read(vcpu));
 	int idx;
 	struct desc_ptr dt;
 
