@@ -3216,9 +3216,11 @@ bool kvm_hv_vtl_interrupt_entry(struct kvm_vcpu *vcpu,
 
 	/*
 	 * The target resumes its suspended hypercall, if it has one.  The
-	 * resume value is the target's own guest-written RAX; strip the
-	 * VMM-only RAISE_UD control bit so the completion cannot be made
-	 * to inject #UD by the guest.
+	 * resume value is the shared RAX as copied from the entering plane
+	 * just above: GPRs are VTL-shared, so the retired hypercall's RAX
+	 * must match what every other shared register already shows.  The
+	 * value is guest-derived; strip the VMM-only RAISE_UD control bit
+	 * so the completion cannot be made to inject #UD by the guest.
 	 */
 	if (target->arch.complete_userspace_io) {
 		vcpu->run->hyperv.u.hcall.result = kvm_rax_read(target) &
