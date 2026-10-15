@@ -775,6 +775,15 @@ struct kvm_vcpu_hv {
 	 */
 	u64 hcall_exit_rip;
 
+	/*
+	 * Set when an in-kernel VTL switch armed the deferred completion:
+	 * the resume value only lands in run->hyperv.u.hcall.result when
+	 * the opposite-direction switch provides it.  While set, the run
+	 * union holds unrelated bytes and the completion must retry the
+	 * hypercall instead of consuming them.
+	 */
+	bool hcall_resume_pending;
+
 	bool suspended;
 	int waiting_on;
 

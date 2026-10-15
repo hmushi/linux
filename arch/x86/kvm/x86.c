@@ -4931,7 +4931,6 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_HYPERV_CPUID:
 	case KVM_CAP_HYPERV_ENFORCE_CPUID:
 	case KVM_CAP_SYS_HYPERV_CPUID:
-	case KVM_CAP_HYPERV_FORWARD_HCALL:
 	case KVM_CAP_HYPERV_VTL_SWITCH:
 	case KVM_CAP_HYPERV_REG_INTERCEPT:
 	case KVM_CAP_HYPERV_TLB_FLUSH_INHIBIT:
@@ -4981,6 +4980,16 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_TRANSLATE2:
 		r = 1;
 		break;
+#ifdef CONFIG_KVM_HYPERV
+	case KVM_CAP_HYPERV_FORWARD_HCALL:
+		/*
+		 * 2: KVM_HV_HCALL_RESULT_RAISE_UD is honoured on hypercall
+		 * completion.  A VMM must not set the bit on kernels
+		 * reporting 1, where it lands in guest RAX instead.
+		 */
+		r = 2;
+		break;
+#endif
 	case KVM_CAP_PRE_FAULT_MEMORY:
 		r = tdp_enabled;
 		break;
