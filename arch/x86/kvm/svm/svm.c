@@ -5324,7 +5324,16 @@ static void svm_free_plane(struct kvm_plane *plane)
 static unsigned svm_max_planes(struct kvm *kvm)
 {
 #ifdef CONFIG_KVM_AMD_SEV
-	if (____sev_snp_guest(kvm))
+	/*
+	 * Key SNP-ness off the immutable vm_type, not the mutable SEV
+	 * state: KVM_CHECK_EXTENSION(KVM_CAP_PLANES) reaches here with no
+	 * lock held, while __sev_guest_init() sets and rolls back
+	 * sev->active/es_active/SNP_ACTIVE under kvm->lock.  The VM type
+	 * is fixed at creation, so the lockless read neither races the
+	 * rollback nor lets the limit change under KVM_CREATE_PLANE's
+	 * pre-lock bound check.
+	 */
+	if (kvm->arch.vm_type == KVM_X86_SNP_VM)
 		return sev_snp_max_planes(kvm);
 #endif
 

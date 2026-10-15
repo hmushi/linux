@@ -5861,5 +5861,9 @@ bool sev_snp_blocked(enum inject_type type, struct kvm_vcpu *vcpu)
 
 int sev_snp_max_planes(struct kvm *kvm)
 {
-	return vmpl_levels;
+	/*
+	 * CPUID 0x8000001f EBX[15:12] is host-provided data; a zero there
+	 * must not report "no planes at all" (plane 0 always exists).
+	 */
+	return max(vmpl_levels, 1U);
 }
