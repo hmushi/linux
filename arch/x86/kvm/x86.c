@@ -7074,7 +7074,7 @@ planes_unlock:
 		r = -EINVAL;
 		if (cap->args[0] & ~1ULL)
 			break;
-		to_kvm_hv(kvm)->hv_inkernel_vtl_switch = !!cap->args[0];
+		WRITE_ONCE(to_kvm_hv(kvm)->hv_inkernel_vtl_switch, !!cap->args[0]);
 		r = 0;
 		break;
 #endif
@@ -11383,7 +11383,7 @@ static struct kvm_vcpu *kvm_higher_plane_with_event(struct kvm_vcpu *vcpu)
 		 * switching the event is consumable via the interrupt exit,
 		 * so it does count.
 		 */
-		if (to_kvm_hv(vcpu->kvm)->hv_inkernel_vtl_switch &&
+		if (READ_ONCE(to_kvm_hv(vcpu->kvm)->hv_inkernel_vtl_switch) &&
 		    kvm_hv_vtl_entry_blocked(higher))
 			continue;
 #endif
@@ -11436,7 +11436,7 @@ static bool kvm_hv_vtl_interrupt_exit(struct kvm_vcpu *vcpu)
 {
 	struct kvm_vcpu *higher;
 
-	if (to_kvm_hv(vcpu->kvm)->hv_inkernel_vtl_switch)
+	if (READ_ONCE(to_kvm_hv(vcpu->kvm)->hv_inkernel_vtl_switch))
 		return false;
 
 	higher = kvm_higher_plane_with_event(vcpu);
@@ -11993,7 +11993,7 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 		goto out;
 	}
 
-	if (to_kvm_hv(vcpu->kvm)->hv_inkernel_vtl_switch) {
+	if (READ_ONCE(to_kvm_hv(vcpu->kvm)->hv_inkernel_vtl_switch)) {
 		struct kvm_vcpu *higher = kvm_higher_plane_with_event(vcpu);
 
 		if (higher) {

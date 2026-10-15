@@ -3592,7 +3592,7 @@ int kvm_hv_hypercall(struct kvm_vcpu *vcpu)
 			ret = HV_STATUS_INVALID_HYPERCALL_INPUT;
 			break;
 		}
-		if (to_kvm_hv(vcpu->kvm)->hv_inkernel_vtl_switch &&
+		if (READ_ONCE(to_kvm_hv(vcpu->kvm)->hv_inkernel_vtl_switch) &&
 		    !hc.fast &&
 		    !kvm_hv_vtl_switch(vcpu, hc.code == HVCALL_VTL_RETURN)) {
 			/*
