@@ -612,7 +612,7 @@ static void stimer_mark_pending(struct kvm_vcpu_hv_stimer *stimer,
 		int p;
 
 		for (p = 0; p < vcpu->plane_level; p++) {
-			twin = vcpu->common->vcpus[p];
+			twin = READ_ONCE(vcpu->common->vcpus[p]);
 			if (twin) {
 				kvm_make_request(KVM_REQ_UNBLOCK, twin);
 				kvm_vcpu_kick(twin);
@@ -2370,7 +2370,7 @@ static void hv_tlb_flush_enqueue_all_planes(struct kvm_vcpu *v,
 	int p;
 
 	for (p = 0; p < KVM_MAX_PLANES; p++) {
-		twin = v->common->vcpus[p];
+		twin = READ_ONCE(v->common->vcpus[p]);
 		if (!twin || !to_hv_vcpu(twin))
 			continue;
 		fifo = kvm_hv_get_tlb_flush_fifo(twin, false);
@@ -2522,7 +2522,7 @@ static s64 kvm_hv_flush_tlb(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
 			 * locked plane's vCPU, so only callers in that plane
 			 * (their twin at the caller's own level) suspend.
 			 */
-			t = v->common->vcpus[vcpu->plane_level];
+			t = READ_ONCE(v->common->vcpus[vcpu->plane_level]);
 			if (t && to_hv_vcpu(t) &&
 			    READ_ONCE(to_hv_vcpu(t)->tlb_flush_inhibit))
 				goto ret_suspend;
@@ -2539,7 +2539,7 @@ static s64 kvm_hv_flush_tlb(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
 				continue;
 			}
 
-			t = v->common->vcpus[vcpu->plane_level];
+			t = READ_ONCE(v->common->vcpus[vcpu->plane_level]);
 			if (t && to_hv_vcpu(t) &&
 			    READ_ONCE(to_hv_vcpu(t)->tlb_flush_inhibit))
 				goto ret_suspend;
@@ -2570,7 +2570,7 @@ static s64 kvm_hv_flush_tlb(struct kvm_vcpu *vcpu, struct kvm_hv_hcall *hc)
 						    sparse_banks))
 				continue;
 
-			t = v->common->vcpus[vcpu->plane_level];
+			t = READ_ONCE(v->common->vcpus[vcpu->plane_level]);
 			if (t && to_hv_vcpu(t) &&
 			    READ_ONCE(to_hv_vcpu(t)->tlb_flush_inhibit))
 				goto ret_suspend;
@@ -2632,7 +2632,7 @@ static void kvm_hv_send_ipi_to_many(struct kvm *kvm, u32 vector,
 		 * VTL): deliver into that plane's APIC.
 		 */
 		if (target_plane) {
-			target = vcpu->common->vcpus[target_plane];
+			target = READ_ONCE(vcpu->common->vcpus[target_plane]);
 			if (!target)
 				continue;
 		}
