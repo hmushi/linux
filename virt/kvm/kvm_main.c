@@ -3858,7 +3858,6 @@ int kvm_plane_write_guest(struct kvm_plane *plane, gpa_t gpa, const void *data,
 	}
 	return 0;
 }
-EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_plane_write_guest);
 
 /* Read counterpart of kvm_plane_write_guest(). */
 int kvm_plane_read_guest(struct kvm_plane *plane, gpa_t gpa, void *data,
@@ -3883,7 +3882,6 @@ int kvm_plane_read_guest(struct kvm_plane *plane, gpa_t gpa, void *data,
 	}
 	return 0;
 }
-EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_plane_read_guest);
 
 int kvm_vcpu_write_guest(struct kvm_vcpu *vcpu, gpa_t gpa, const void *data,
 		         unsigned long len)
