@@ -3138,6 +3138,36 @@ static u64 hv_vtl_assist_page_gpa(struct kvm_vcpu *vcpu)
  */
 #define HV_VTL_ENTRY_REASON_INTERRUPT	2
 
+/*
+ * States in which the in-kernel paths must not enter a plane:
+ *
+ *  - never entered the guest: it still holds reset state (userspace owns
+ *    HvCallEnableVpVtl and runs a plane's first entry itself);
+ *  - stopped by userspace with KVM_SET_PLANE_RUN_STATE: the VMM owns
+ *    restarting it;
+ *  - parked on a non-hypercall completion (MMIO, PIO): the completion
+ *    owns the shared run union, which the resume protocol would clobber.
+ *
+ * The forced interrupt entry refuses such a target (the event stays
+ * pending), and kvm_higher_plane_with_event() must not report its
+ * pending event as a wakeup either, or a halted lower VTL spins through
+ * hlt/wake with nothing able to consume the event.
+ */
+bool kvm_hv_vtl_entry_blocked(struct kvm_vcpu *target)
+{
+	if (target->arch.last_vmentry_cpu == -1)
+		return true;
+
+	if (target->plane_user_stopped)
+		return true;
+
+	if (target->arch.complete_userspace_io &&
+	    target->arch.complete_userspace_io != kvm_hv_hypercall_complete_userspace)
+		return true;
+
+	return false;
+}
+
 bool kvm_hv_vtl_interrupt_entry(struct kvm_vcpu *vcpu,
 				struct kvm_vcpu *target)
 {
@@ -3153,32 +3183,8 @@ bool kvm_hv_vtl_interrupt_entry(struct kvm_vcpu *vcpu,
 		VCPU_REGS_R12, VCPU_REGS_R13, VCPU_REGS_R14, VCPU_REGS_R15,
 	};
 
-	/*
-	 * Never force an entry into a plane that has never entered the
-	 * guest: it still holds reset state (userspace owns
-	 * HvCallEnableVpVtl and runs a plane's first entry itself).  The
-	 * event stays pending until the plane is started.
-	 */
-	if (target->arch.last_vmentry_cpu == -1)
-		return false;
-
-	/*
-	 * Never override a userspace stop: the VMM parked this plane with
-	 * KVM_SET_PLANE_RUN_STATE and owns restarting it.  The event stays
-	 * pending until then.
-	 */
-	if (target->plane_user_stopped)
-		return false;
-
-	/*
-	 * The hcall.result write below assumes the target's armed
-	 * completion is the hypercall one.  Any other pending completion
-	 * (MMIO, PIO) owns the shared run union and must consume it
-	 * before the plane is resumed with a hypercall result; leave
-	 * such a plane to userspace and keep the event pending.
-	 */
-	if (target->arch.complete_userspace_io &&
-	    target->arch.complete_userspace_io != kvm_hv_hypercall_complete_userspace)
+	/* The event stays pending until the plane can be entered. */
+	if (kvm_hv_vtl_entry_blocked(target))
 		return false;
 
 	/*

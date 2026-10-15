@@ -11361,6 +11361,20 @@ static struct kvm_vcpu *kvm_higher_plane_with_event(struct kvm_vcpu *vcpu)
 		higher = vcpu->common->vcpus[i];
 		if (!higher)
 			continue;
+#ifdef CONFIG_KVM_HYPERV
+		/*
+		 * With in-kernel switching, an event on a plane the forced
+		 * entry would refuse (never run, user-stopped, parked on a
+		 * foreign completion) has no consumer until userspace
+		 * starts the plane; reporting it would wake a halted lower
+		 * VTL into an endless hlt/wake loop.  With userspace
+		 * switching the event is consumable via the interrupt exit,
+		 * so it does count.
+		 */
+		if (to_kvm_hv(vcpu->kvm)->hv_inkernel_vtl_switch &&
+		    kvm_hv_vtl_entry_blocked(higher))
+			continue;
+#endif
 		/*
 		 * Forced entry is edge-triggered on the posting of an
 		 * event, not level-triggered on the target's IRR: one
