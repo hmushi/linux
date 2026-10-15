@@ -4797,6 +4797,18 @@ static int svm_update_hv_reg_intercepts(struct kvm_vcpu *vcpu)
 	 * these bits out of vmcb02 unless L1 asked for them itself.
 	 */
 	if (kvm_hv_dt_intercepts_armed(vcpu)) {
+		/*
+		 * The diverted load needs full emulation, which encrypted
+		 * guests cannot have: on SEV-ES and SNP the emulator cannot
+		 * read the registers, so svm_check_emulate_instruction()
+		 * retries at the same RIP with the intercept still armed and
+		 * every descriptor-table load livelocks the vCPU; on plain
+		 * SEV there are no instruction bytes to decode and a valid
+		 * lgdt takes a spurious #UD.  Refuse to arm.
+		 */
+		if (is_sev_guest(vcpu))
+			return -EINVAL;
+
 		svm_set_intercept(svm, INTERCEPT_LOAD_IDTR);
 		svm_set_intercept(svm, INTERCEPT_LOAD_GDTR);
 		svm_set_intercept(svm, INTERCEPT_LOAD_LDTR);
