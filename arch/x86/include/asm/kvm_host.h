@@ -306,6 +306,8 @@ enum x86_intercept_stage;
 #define PWALK_SET_ALL	(PWALK_SET_ACCESSED | PWALK_SET_DIRTY)
 
 #define PWALK_STATUS_READ_ONLY_PTE_GPA BIT(0)
+/* An A/D bit update was cut short by a write failure or a lost cmpxchg. */
+#define PWALK_STATUS_SET_BITS_FAILED   BIT(1)
 
 /* apic attention bits */
 #define KVM_APIC_CHECK_VAPIC	0

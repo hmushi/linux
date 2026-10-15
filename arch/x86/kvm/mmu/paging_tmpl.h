@@ -368,6 +368,7 @@ static int FNAME(walk_addr_generic)(struct guest_walker *walker,
 	u16 errcode = 0;
 	gpa_t real_gpa = INVALID_GPA;
 	gpa_t pte_fault_gpa = INVALID_GPA;
+	bool leaf_visited = false;
 	gfn_t gfn;
 
 	trace_kvm_mmu_pagetable_walk(addr, access);
@@ -542,8 +543,15 @@ retry_walk:
 
 	real_gpa = kvm_translate_gpa(vcpu, mmu, gfn_to_gpa(gfn), access, flags,
 				     &walker->fault, status);
-	if (real_gpa == INVALID_GPA)
+	if (real_gpa == INVALID_GPA) {
+		/*
+		 * Only the nested translation of the final data GPA
+		 * failed; every level, the leaf included, was
+		 * successfully visited.
+		 */
+		leaf_visited = true;
 		goto late_exit;
+	}
 
 	walker->gfn = real_gpa >> PAGE_SHIFT;
 
@@ -562,9 +570,11 @@ retry_walk:
 		ret = FNAME(update_accessed_dirty_bits)(vcpu, mmu, walker,
 							addr, write_fault && set_dirty,
 							status);
-		if (unlikely(ret < 0))
+		if (unlikely(ret < 0)) {
+			if (status)
+				*status |= PWALK_STATUS_SET_BITS_FAILED;
 			goto error;
-		else if (ret)
+		} else if (ret)
 			goto retry_walk;
 	}
 
@@ -620,13 +630,19 @@ error:
 late_exit:
 	if (force_set) {
 		/*
-		 * Don't set the accessed bit for the page table that caused the
-		 * walk to fail.
+		 * Don't set the accessed bit for a page table whose own
+		 * PTE was never read or validated.  When only the final
+		 * data-GPA translation failed, every level including the
+		 * leaf was successfully visited and keeps its bit.
 		 */
-		++walker->level;
-		FNAME(update_accessed_dirty_bits)(vcpu, mmu, walker, addr,
-						  false, status);
-		--walker->level;
+		if (!leaf_visited)
+			++walker->level;
+		ret = FNAME(update_accessed_dirty_bits)(vcpu, mmu, walker,
+							addr, false, status);
+		if (ret && status)
+			*status |= PWALK_STATUS_SET_BITS_FAILED;
+		if (!leaf_visited)
+			--walker->level;
 	}
 	return 0;
 }
