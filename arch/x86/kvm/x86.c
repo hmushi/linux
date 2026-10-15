@@ -13511,10 +13511,10 @@ int kvm_arch_vcpu_ioctl_translate(struct kvm_vcpu *vcpu,
 	gpa = kvm_mmu_gva_to_gpa_system(vcpu, vaddr, NULL);
 	/*
 	 * Report write access from a supervisor-level walk instead of the
-	 * hardcoded 1: Hyper-V's TranslateVirtualAddress write validation
-	 * is answered from this ioctl, and the reference hypervisor walks
-	 * with PFERR_WRITE_MASK and no user bit (BrimstoneLinux
-	 * kvm_hv_xlate_va_walk).
+	 * hardcoded 1: the write validation of Hyper-V's
+	 * HvCallTranslateVirtualAddress (TLFS) is answered from this
+	 * ioctl, and that hypercall specifies a privileged walk, i.e.
+	 * PFERR_WRITE_MASK with no user bit.
 	 *
 	 * The probe walk passes no PWALK flags, so this query ioctl never
 	 * sets guest dirty bits, and it only runs when the primary walk
