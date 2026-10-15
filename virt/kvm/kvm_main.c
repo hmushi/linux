@@ -4404,6 +4404,19 @@ static int kvm_plane_ioctl_create_vcpu(struct kvm_plane *plane, unsigned long id
 
 	mutex_lock(&kvm->lock);
 
+	/*
+	 * The vcpu_idx picked at kvm_vcpu_init_common() time is only a
+	 * guess: online_vcpus moves between that read and this insert when
+	 * several vCPUs are created concurrently (losers would collide in
+	 * the xarray and fail with EBUSY).  Re-read it under kvm->lock,
+	 * which finish_common() holds across the online_vcpus increment.
+	 * Nonzero planes keep the plane-0 twin's index.
+	 */
+	if (plane->level == 0) {
+		vcpu->common->vcpu_idx = atomic_read(&kvm->online_vcpus);
+		vcpu->vcpu_idx = vcpu->common->vcpu_idx;
+	}
+
 	r = xa_insert(&plane->vcpu_array, vcpu->vcpu_idx, vcpu, GFP_KERNEL_ACCOUNT);
 	WARN_ON_ONCE(r == -EBUSY);
 	if (r)
