@@ -566,6 +566,14 @@ translation mode.
 	__u8  pad[5];
   };
 
+On kernels which advertise KVM_CAP_TRANSLATE2, 'writeable' reports the
+result of a supervisor-mode write-access walk of the guest page tables:
+whether a supervisor write to the translated address would be permitted.
+The probe walk sets no accessed or dirty bits, and 'writeable' is only
+meaningful when 'valid' is set.  On older kernels 'writeable' is
+hardcoded to 1.  The primary translation may set accessed bits in the
+guest page tables, as it always has.
+
 
 4.16 KVM_INTERRUPT
 ------------------

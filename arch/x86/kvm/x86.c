@@ -13450,11 +13450,16 @@ int kvm_arch_vcpu_ioctl_translate(struct kvm_vcpu *vcpu,
 	 * is answered from this ioctl, and the reference hypervisor walks
 	 * with PFERR_WRITE_MASK and no user bit (BrimstoneLinux
 	 * kvm_hv_xlate_va_walk).
+	 *
+	 * The probe walk passes no PWALK flags, so this query ioctl never
+	 * sets guest dirty bits, and it only runs when the primary walk
+	 * succeeded so a failed translation cannot report writeable = 1.
 	 */
-	tr->writeable = vcpu->arch.walk_mmu->gva_to_gpa(vcpu,
+	tr->writeable = gpa != INVALID_GPA &&
+			vcpu->arch.walk_mmu->gva_to_gpa(vcpu,
 							vcpu->arch.walk_mmu,
 							vaddr, PFERR_WRITE_MASK,
-							PWALK_SET_ALL, NULL,
+							0, NULL,
 							NULL) != INVALID_GPA;
 	srcu_read_unlock(&vcpu->kvm->srcu, idx);
 	tr->physical_address = gpa;
