@@ -11989,9 +11989,27 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 	if (to_kvm_hv(vcpu->kvm)->hv_inkernel_vtl_switch) {
 		struct kvm_vcpu *higher = kvm_higher_plane_with_event(vcpu);
 
-		if (higher && kvm_hv_vtl_interrupt_entry(vcpu, higher)) {
-			kvm_make_request(KVM_REQ_EVENT, higher);
-			kvm_make_request(KVM_REQ_PLANE_RESCHED, vcpu);
+		if (higher) {
+			if (kvm_hv_vtl_interrupt_entry(vcpu, higher)) {
+				kvm_make_request(KVM_REQ_EVENT, higher);
+				kvm_make_request(KVM_REQ_PLANE_RESCHED, vcpu);
+			} else {
+				/*
+				 * Single-shot in in-kernel mode too: the
+				 * refusal (a failing control-area write;
+				 * blocked planes are filtered in
+				 * kvm_higher_plane_with_event()) cannot
+				 * succeed until external action, so consume
+				 * the markers rather than repeating the
+				 * failing guest write on every exit.  The
+				 * event stays latched in the plane's own
+				 * pending state for its next entry.
+				 */
+				WRITE_ONCE(higher->arch.hv_apic_event_pending,
+					   false);
+				WRITE_ONCE(higher->arch.hv_nmi_event_pending,
+					   false);
+			}
 		}
 	}
 #endif
