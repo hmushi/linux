@@ -1470,6 +1470,7 @@ struct kvm_plane_memory_overlay {
 #define KVM_SET_PLANE_MEMORY_OVERLAY	  _IOW(KVMIO, 0xe7, struct kvm_plane_memory_overlay)
 #define   KVM_PLANE_RUN_STATE_STOPPED	0
 #define   KVM_PLANE_RUN_STATE_RUNNABLE	1
+#define   KVM_PLANE_RUN_STATE_KERNEL_STOPPED	2
 
 /*
  * ioctls for vcpu fds

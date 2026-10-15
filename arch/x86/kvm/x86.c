@@ -11938,7 +11938,8 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 	}
 
 	if (kvm_check_plane0_events(vcpu) &&
-	    !vcpu->common->vcpus[0]->plane_user_stopped) {
+	    !vcpu->common->vcpus[0]->plane_user_stopped &&
+	    !vcpu->common->vcpus[0]->plane_kernel_stopped) {
 		kvm_vcpu_set_plane_runnable(vcpu->common->vcpus[0]);
 
 		kvm_make_request(KVM_REQ_EVENT, vcpu);

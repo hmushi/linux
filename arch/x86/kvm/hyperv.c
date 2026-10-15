@@ -3132,6 +3132,14 @@ bool kvm_hv_vtl_interrupt_entry(struct kvm_vcpu *vcpu,
 		return false;
 
 	/*
+	 * Never override a userspace stop: the VMM parked this plane with
+	 * KVM_SET_PLANE_RUN_STATE and owns restarting it.  The event stays
+	 * pending until then.
+	 */
+	if (target->plane_user_stopped)
+		return false;
+
+	/*
 	 * The hcall.result write below assumes the target's armed
 	 * completion is the hypercall one.  Any other pending completion
 	 * (MMIO, PIO) owns the shared run union and must consume it
@@ -3184,9 +3192,8 @@ bool kvm_hv_vtl_interrupt_entry(struct kvm_vcpu *vcpu,
 		vcpu->run->hyperv.u.hcall.result = kvm_rax_read(target) &
 						   ~KVM_HV_HCALL_RESULT_RAISE_UD;
 
-	vcpu->plane_user_stopped = true;
+	vcpu->plane_kernel_stopped = true;
 	kvm_vcpu_set_plane_stopped(vcpu);
-	target->plane_user_stopped = false;
 	kvm_vcpu_set_plane_runnable(target);
 	return true;
 }
@@ -3215,6 +3222,13 @@ static int kvm_hv_vtl_switch(struct kvm_vcpu *vcpu, bool is_return)
 	if (to < 0 || to >= KVM_MAX_PLANES || !vcpu->common->vcpus[to])
 		return -ENOENT;
 	target = vcpu->common->vcpus[to];
+
+	/*
+	 * A VMM-stopped plane stays stopped until the VMM restarts it.
+	 * Forward the switch so userspace can apply its own policy.
+	 */
+	if (target->plane_user_stopped)
+		return -ENOENT;
 
 	/*
 	 * The resume protocol below delivers the result through the
@@ -3341,9 +3355,8 @@ static int kvm_hv_vtl_switch(struct kvm_vcpu *vcpu, bool is_return)
 	to_hv_vcpu(vcpu)->hcall_exit_rip = kvm_get_linear_rip(vcpu);
 	vcpu->arch.complete_userspace_io = kvm_hv_hypercall_complete_userspace;
 
-	vcpu->plane_user_stopped = true;
+	vcpu->plane_kernel_stopped = true;
 	kvm_vcpu_set_plane_stopped(vcpu);
-	target->plane_user_stopped = false;
 	kvm_vcpu_set_plane_runnable(target);
 	kvm_make_request(KVM_REQ_PLANE_RESCHED, vcpu);
 	return 0;
