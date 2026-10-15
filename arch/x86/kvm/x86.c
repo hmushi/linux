@@ -1071,6 +1071,13 @@ void kvm_inject_nmi(struct kvm_vcpu *vcpu)
 {
 	atomic_inc(&vcpu->arch.nmi_queued);
 	kvm_make_request(KVM_REQ_NMI, vcpu);
+	/*
+	 * NMI state posted to a suspended higher plane earns one entry
+	 * attempt through the single-shot marker, like the APIC event
+	 * path; the queued NMI itself is delivered when the plane runs.
+	 */
+	if (vcpu->plane_level)
+		WRITE_ONCE(vcpu->arch.hv_nmi_event_pending, true);
 }
 
 void kvm_queue_exception_e(struct kvm_vcpu *vcpu, unsigned nr, u32 error_code)
@@ -5821,8 +5828,13 @@ static int kvm_vcpu_ioctl_x86_set_vcpu_events(struct kvm_vcpu *vcpu,
 	if (events->flags & KVM_VCPUEVENT_VALID_NMI_PENDING) {
 		vcpu->arch.nmi_pending = 0;
 		atomic_set(&vcpu->arch.nmi_queued, events->nmi.pending);
-		if (events->nmi.pending)
+		if (events->nmi.pending) {
 			kvm_make_request(KVM_REQ_NMI, vcpu);
+			/* One entry attempt for a parked higher plane. */
+			if (vcpu->plane_level)
+				WRITE_ONCE(vcpu->arch.hv_nmi_event_pending,
+					   true);
+		}
 	}
 	kvm_x86_call(set_nmi_mask)(vcpu, events->nmi.masked);
 
@@ -11390,8 +11402,10 @@ static struct kvm_vcpu *kvm_higher_plane_with_event(struct kvm_vcpu *vcpu)
 		 * waits for the next cooperative entry or the next posted
 		 * event; scanning the IRR here instead would replay it
 		 * the moment the assist page is re-enabled.  NMIs force
-		 * entry ungated (they are folded back to plane 0, so the
-		 * higher APIC carries nothing to gate on), and a pending
+		 * entry ungated through their own single-shot marker, set
+		 * wherever NMI state is posted to a higher plane (the
+		 * higher APIC carries nothing to gate on; the NMI itself
+		 * is folded back to plane 0 on the APIC path).  A pending
 		 * synthetic-timer request counts as well: it can only be
 		 * processed (and its interrupt delivered) once the higher
 		 * plane runs, so it would otherwise never fire while the
@@ -11405,9 +11419,6 @@ static struct kvm_vcpu *kvm_higher_plane_with_event(struct kvm_vcpu *vcpu)
 		    READ_ONCE(higher->arch.hv_nmi_event_pending) ||
 		    kvm_cpu_has_extint(higher) ||
 		    kvm_test_request(KVM_REQ_HV_STIMER, higher) ||
-		    kvm_test_request(KVM_REQ_NMI, higher) ||
-		    atomic_read(&higher->arch.nmi_queued) ||
-		    higher->arch.nmi_pending ||
 		    (higher->arch.apic &&
 		     atomic_read(&higher->arch.apic->lapic_timer.pending)))
 			return higher;
