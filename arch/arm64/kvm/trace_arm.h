@@ -111,7 +111,8 @@ TRACE_EVENT(kvm_irq_line,
 	TP_printk("Inject %s interrupt (%d), vcpu->idx: %d, num: %d, level: %d",
 		  (__entry->type == KVM_ARM_IRQ_TYPE_CPU) ? "CPU" :
 		  (__entry->type == KVM_ARM_IRQ_TYPE_PPI) ? "VGIC PPI" :
-		  (__entry->type == KVM_ARM_IRQ_TYPE_SPI) ? "VGIC SPI" : "UNKNOWN",
+		  (__entry->type == KVM_ARM_IRQ_TYPE_SPI) ? "VGIC SPI" :
+		  (__entry->type == KVM_ARM_IRQ_TYPE_SGI) ? "VGIC SGI" : "UNKNOWN",
 		  __entry->type, __entry->vcpu_idx, __entry->irq_num, __entry->level)
 );
 

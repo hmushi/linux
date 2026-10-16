@@ -410,6 +410,7 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_ARM_NISV_TO_USER:
 	case KVM_CAP_ARM_INJECT_EXT_DABT:
 	case KVM_CAP_ARM_HVC_IMM_EXITS:
+	case KVM_CAP_ARM_IRQ_LINE_SGI:
 	case KVM_CAP_SET_GUEST_DEBUG:
 	case KVM_CAP_VCPU_ATTRIBUTES:
 	case KVM_CAP_PTP_KVM:
@@ -1675,8 +1676,9 @@ static int __kvm_vm_ioctl_irq_line(struct kvm *kvm, struct kvm_plane *plane,
 
 	trace_kvm_irq_line(irq_type, vcpu_id, irq_num, irq_level->level);
 
-	/* Only a PPI is private to a plane; SPIs and the CPU lines are plane 0's. */
-	if (plane->level && irq_type != KVM_ARM_IRQ_TYPE_PPI)
+	/* Only private interrupts can target a nonzero plane. */
+	if (plane->level && irq_type != KVM_ARM_IRQ_TYPE_SGI &&
+	    irq_type != KVM_ARM_IRQ_TYPE_PPI)
 		return -EINVAL;
 
 	switch (irq_type) {
@@ -1692,6 +1694,18 @@ static int __kvm_vm_ioctl_irq_line(struct kvm *kvm, struct kvm_plane *plane,
 			return -EINVAL;
 
 		return vcpu_interrupt_line(vcpu, irq_num, level);
+	case KVM_ARM_IRQ_TYPE_SGI:
+		if (!irqchip_in_kernel(kvm))
+			return -ENXIO;
+
+		if (kvm->arch.vgic.vgic_model != KVM_DEV_TYPE_ARM_VGIC_V3)
+			return -EINVAL;
+
+		vcpu = plane_get_vcpu_by_id(plane, vcpu_id);
+		if (!vcpu || irq_num >= VGIC_NR_SGIS)
+			return -EINVAL;
+
+		return kvm_vgic_inject_irq(kvm, vcpu, irq_num, level, NULL);
 	case KVM_ARM_IRQ_TYPE_PPI:
 		if (!irqchip_in_kernel(kvm))
 			return -ENXIO;
@@ -1744,10 +1758,7 @@ int kvm_vm_ioctl_irq_line(struct kvm *kvm, struct kvm_irq_level *irq_level,
 	return __kvm_vm_ioctl_irq_line(kvm, kvm->planes[0], irq_level);
 }
 
-/*
- * KVM_IRQ_LINE on a plane fd: the PPI reaches the vCPU of that plane, whose
- * redistributor holds its own private interrupt state.
- */
+/* KVM_IRQ_LINE on a plane fd targets that plane's private interrupts. */
 int kvm_arch_plane_irq_line(struct kvm_plane *plane,
 			    struct kvm_irq_level *irq_level)
 {

@@ -515,7 +515,7 @@ retry:
 /**
  * kvm_vgic_inject_irq - Inject an IRQ from a device to the vgic
  * @kvm:     The VM structure pointer
- * @vcpu:    The CPU for PPIs or NULL for global interrupts
+ * @vcpu:    The CPU for private interrupts or NULL for global interrupts
  * @intid:   The INTID to inject a new state to.
  * @level:   Edge-triggered:  true:  to trigger the interrupt
  *			      false: to ignore the call
@@ -559,6 +559,14 @@ int kvm_vgic_inject_irq(struct kvm *kvm, struct kvm_vcpu *vcpu,
 		raw_spin_unlock_irqrestore(&irq->irq_lock, flags);
 		vgic_put_irq(kvm, irq);
 		return 0;
+	}
+
+	if (irq->hw && vgic_irq_is_sgi(irq->intid)) {
+		ret = irq_set_irqchip_state(irq->host_irq,
+					    IRQCHIP_STATE_PENDING, true);
+		raw_spin_unlock_irqrestore(&irq->irq_lock, flags);
+		vgic_put_irq(kvm, irq);
+		return ret;
 	}
 
 	if (irq->config == VGIC_CONFIG_LEVEL)

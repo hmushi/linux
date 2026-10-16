@@ -460,6 +460,7 @@ enum {
 #define KVM_ARM_IRQ_TYPE_CPU		0
 #define KVM_ARM_IRQ_TYPE_SPI		1
 #define KVM_ARM_IRQ_TYPE_PPI		2
+#define KVM_ARM_IRQ_TYPE_SGI		3
 
 /* out-of-kernel GIC cpu interrupt injection irq_number field */
 #define KVM_ARM_IRQ_CPU_IRQ		0
