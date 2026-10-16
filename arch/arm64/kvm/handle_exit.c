@@ -51,6 +51,9 @@ static int handle_hvc(struct kvm_vcpu *vcpu)
 		return 1;
 	}
 
+	if (kvm_arm_hvc_imm_exit(vcpu, kvm_vcpu_hvc_get_imm(vcpu)))
+		return 0;
+
 	return kvm_smccc_call_handler(vcpu);
 }
 

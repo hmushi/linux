@@ -1104,6 +1104,7 @@ struct kvm_enable_cap {
 #define KVM_CAP_HYPERV_TLB_FLUSH_INHIBIT 255
 #define KVM_CAP_TRANSLATE2 256
 #define KVM_CAP_PLANE_MEMORY_OVERLAYS 257
+#define KVM_CAP_ARM_HVC_IMM_EXITS 258
 
 struct kvm_irq_routing_irqchip {
 	__u32 irqchip;

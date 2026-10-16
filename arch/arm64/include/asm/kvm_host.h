@@ -403,6 +403,9 @@ struct kvm_arch {
 	struct kvm_smccc_features smccc_feat;
 	struct maple_tree smccc_filter;
 
+	/* HVC immediates that exit to userspace, bit n for HVC #n */
+	u64 hvc_imm_exits;
+
 	/*
 	 * Emulated CPU ID registers per VM
 	 * (Op0, Op1, CRn, CRm, Op2) of the ID registers to be saved in it
@@ -869,7 +872,10 @@ struct vcpu_reset_state {
 
 struct vncr_tlb;
 
-struct kvm_vcpu_arch_common {};
+struct kvm_vcpu_arch_common {
+	/* Plane whose HVC immediate exit awaits completion, or -1 */
+	s8 hvc_imm_exit_plane;
+};
 
 static inline int kvm_arch_vcpu_common_init(struct kvm_vcpu_common *common) { return 0; }
 static inline void kvm_arch_vcpu_common_destroy(struct kvm_vcpu_common *common) {}

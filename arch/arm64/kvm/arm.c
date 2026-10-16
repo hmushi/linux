@@ -188,6 +188,9 @@ int kvm_vm_ioctl_enable_cap(struct kvm *kvm,
 		r = 0;
 		set_bit(KVM_ARCH_FLAG_EXIT_SEA, &kvm->arch.flags);
 		break;
+	case KVM_CAP_ARM_HVC_IMM_EXITS:
+		r = kvm_arm_set_hvc_imm_exits(kvm, cap->args[0]);
+		break;
 	default:
 		break;
 	}
@@ -402,6 +405,7 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_ARM_IRQ_LINE_LAYOUT_2:
 	case KVM_CAP_ARM_NISV_TO_USER:
 	case KVM_CAP_ARM_INJECT_EXT_DABT:
+	case KVM_CAP_ARM_HVC_IMM_EXITS:
 	case KVM_CAP_SET_GUEST_DEBUG:
 	case KVM_CAP_VCPU_ATTRIBUTES:
 	case KVM_CAP_PTP_KVM:
@@ -542,6 +546,8 @@ int kvm_arch_vcpu_create(struct kvm_vcpu *vcpu)
 	int err;
 
 	spin_lock_init(&vcpu->arch.mp_state_lock);
+	if (!vcpu->plane_level)
+		vcpu->common->arch.hvc_imm_exit_plane = -1;
 
 #ifdef CONFIG_LOCKDEP
 	/* Inform lockdep that the config_lock is acquired after vcpu->mutex */
@@ -1268,6 +1274,8 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
 		if (ret <= 0)
 			return ret;
 	}
+
+	kvm_arm_complete_hvc_imm_exit(vcpu);
 
 	vcpu_load(vcpu);
 

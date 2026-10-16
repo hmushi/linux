@@ -526,6 +526,8 @@ struct kvm_smccc_filter {
 
 /* arm64-specific KVM_EXIT_HYPERCALL flags */
 #define KVM_HYPERCALL_EXIT_SMC		(1U << 0)
+/* Set when nr is the HVC immediate (KVM_CAP_ARM_HVC_IMM_EXITS), not a function ID */
+#define KVM_HYPERCALL_EXIT_HVC_IMM	(1U << 2)
 #define KVM_HYPERCALL_EXIT_16BIT	(1U << 1)
 
 /*

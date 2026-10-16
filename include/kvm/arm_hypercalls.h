@@ -7,6 +7,9 @@
 #include <asm/kvm_emulate.h>
 
 int kvm_smccc_call_handler(struct kvm_vcpu *vcpu);
+int kvm_arm_set_hvc_imm_exits(struct kvm *kvm, u64 mask);
+bool kvm_arm_hvc_imm_exit(struct kvm_vcpu *vcpu, u32 imm);
+void kvm_arm_complete_hvc_imm_exit(struct kvm_vcpu *vcpu);
 
 static inline u32 smccc_get_function(struct kvm_vcpu *vcpu)
 {

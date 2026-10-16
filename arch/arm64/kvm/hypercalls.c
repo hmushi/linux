@@ -262,6 +262,72 @@ static void kvm_prepare_hypercall_exit(struct kvm_vcpu *vcpu, u32 func_id)
 	};
 }
 
+int kvm_arm_set_hvc_imm_exits(struct kvm *kvm, u64 mask)
+{
+	int r = 0;
+
+	/* HVC #0 is the SMCCC conduit; the SMCCC filter owns it. */
+	if (mask & BIT(0))
+		return -EINVAL;
+
+	mutex_lock(&kvm->arch.config_lock);
+	if (kvm_vm_has_ran_once(kvm))
+		r = -EBUSY;
+	else
+		kvm->arch.hvc_imm_exits = mask;
+	mutex_unlock(&kvm->arch.config_lock);
+
+	return r;
+}
+
+/*
+ * Exit to userspace for an HVC whose immediate is in the VM's mask.  nr is
+ * the immediate, the registers are untouched and PC already points past the
+ * HVC.  kvm_arm_complete_hvc_imm_exit() reads the result when the plane that
+ * executed the HVC runs again.
+ */
+bool kvm_arm_hvc_imm_exit(struct kvm_vcpu *vcpu, u32 imm)
+{
+	struct kvm_run *run = vcpu->run;
+
+	if (imm >= BITS_PER_LONG || !(vcpu->kvm->arch.hvc_imm_exits & BIT(imm)))
+		return false;
+
+	run->exit_reason = KVM_EXIT_HYPERCALL;
+	run->hypercall = (typeof(run->hypercall)) {
+		.nr	= imm,
+		.flags	= KVM_HYPERCALL_EXIT_HVC_IMM,
+	};
+	if (!kvm_vcpu_trap_il_is32bit(vcpu))
+		run->hypercall.flags |= KVM_HYPERCALL_EXIT_16BIT;
+
+	vcpu->common->arch.hvc_imm_exit_plane = vcpu->plane_level;
+	return true;
+}
+
+/*
+ * ret == 0: userspace handled the call, the guest continues after the HVC.
+ * ret != 0: the call is refused; PC is rewound so the HVC takes an UNDEF.
+ * Another exit or a plane switch before the result is read counts as
+ * handled: the VM does not read kvm_run across a plane switch.
+ */
+void kvm_arm_complete_hvc_imm_exit(struct kvm_vcpu *vcpu)
+{
+	struct kvm_run *run = vcpu->run;
+
+	if (vcpu->common->arch.hvc_imm_exit_plane != vcpu->plane_level)
+		return;
+	vcpu->common->arch.hvc_imm_exit_plane = -1;
+
+	if (run->exit_reason != KVM_EXIT_HYPERCALL ||
+	    !(run->hypercall.flags & KVM_HYPERCALL_EXIT_HVC_IMM) ||
+	    !run->hypercall.ret)
+		return;
+
+	*vcpu_pc(vcpu) -= (run->hypercall.flags & KVM_HYPERCALL_EXIT_16BIT) ? 2 : 4;
+	kvm_inject_undefined(vcpu);
+}
+
 int kvm_smccc_call_handler(struct kvm_vcpu *vcpu)
 {
 	struct kvm_smccc_features *smccc_feat = &vcpu->kvm->arch.smccc_feat;

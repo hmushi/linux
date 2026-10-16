@@ -7106,6 +7106,16 @@ Definition of ``flags``:
    guest used a 32bit instruction. An AArch64 guest always has this
    bit set to 0.
 
+ - ``KVM_HYPERCALL_EXIT_HVC_IMM``: Indicates that the exit is for an HVC
+   whose immediate is enabled with ``KVM_CAP_ARM_HVC_IMM_EXITS``. ``nr``
+   is the immediate, not an SMCCC function ID, and the GPRs are those of
+   the guest at the HVC. Before KVM_RUN resumes the vCPU, userspace sets
+   ``ret`` to 0 if it handled the call, or to a non-zero value to refuse
+   it; a refused HVC takes an undefined instruction exception with the
+   exception link register pointing at the HVC. With planes, the exit is
+   taken in the plane that executed the HVC and ``ret`` is read when that
+   plane runs again; running another plane first counts as handled.
+
 At the point of exit, PC points to the instruction immediately following
 the trapping instruction.
 
@@ -9936,6 +9946,9 @@ announces two things:
  - The extended KVM_EXIT_MEMORY_FAULT layout: 'memory_fault' carries
    the additional 'gva', 'insn_len' and 'insn_bytes' fields, with
    KVM_MEMORY_EXIT_FLAG_GVA_VALID qualifying 'gva' (see section 5).
+ - on arm64 the VTL switch is an ``HVC #2`` or ``HVC #3`` exit enabled with
+   ``KVM_CAP_ARM_HVC_IMM_EXITS``; the register copy between planes is
+   userspace's.
 
 9. Known KVM API problems
 =========================
