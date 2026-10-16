@@ -205,7 +205,11 @@ static int kvm_arm_default_max_vcpus(void)
 
 unsigned kvm_arch_max_planes(struct kvm *kvm)
 {
-	return 1;
+	/* Planes of a VP share a stage-2 and a thread; pKVM owns neither. */
+	if (is_protected_kvm_enabled())
+		return 1;
+
+	return KVM_MAX_PLANES;
 }
 
 struct kvm_plane *kvm_alloc_plane(void)
@@ -671,6 +675,12 @@ static bool kvm_vcpu_should_clear_twe(struct kvm_vcpu *vcpu)
 	return single_task_running();
 }
 
+/* Identifies a plane vCPU in mmu->last_vcpu_ran; vcpu_idx < KVM_MAX_VCPUS. */
+static int kvm_vcpu_tlb_id(struct kvm_vcpu *vcpu)
+{
+	return vcpu->vcpu_idx + vcpu->plane_level * KVM_MAX_VCPUS;
+}
+
 void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 {
 	struct kvm_s2_mmu *mmu;
@@ -701,12 +711,15 @@ void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 	 * previously run on the same physical CPU, call into the
 	 * hypervisor code to nuke the relevant contexts.
 	 *
+	 * The planes of a VP share the VMID but not their stage-1
+	 * translations, so each plane counts as a vcpu of its own here.
+	 *
 	 * We might get preempted before the vCPU actually runs, but
 	 * over-invalidation doesn't affect correctness.
 	 */
-	if (*last_ran != vcpu->vcpu_idx) {
+	if (*last_ran != kvm_vcpu_tlb_id(vcpu)) {
 		kvm_call_hyp(__kvm_flush_cpu_context, mmu);
-		*last_ran = vcpu->vcpu_idx;
+		*last_ran = kvm_vcpu_tlb_id(vcpu);
 	}
 
 nommu:
@@ -840,6 +853,94 @@ int kvm_arch_vcpu_ioctl_set_mpstate(struct kvm_vcpu *vcpu,
 	return ret;
 }
 
+/* An interrupt a plane vCPU would take if it ran; its timers count too. */
+static bool kvm_plane_has_interrupt(struct kvm_vcpu *v, bool lower)
+{
+	/* A lower plane's self-managed timer must not drive a higher one. */
+	if (lower)
+		kvm_timer_clear_idle_irqs(v);
+	else
+		kvm_timer_inject_idle_irqs(v);
+
+	if (*vcpu_hcr(v) & (HCR_VI | HCR_VF | HCR_VSE))
+		return true;
+
+	return irqchip_in_kernel(v->kvm) && kvm_vgic_vcpu_pending_irq(v);
+}
+
+/*
+ * The other planes of this VP with an injectable interrupt.  @higher gets a
+ * higher plane while it is pending, as a switch to it is expected.  @lower
+ * gets a lower plane once per transition to pending: userspace only notifies
+ * the running plane and runs on, so reporting it again would never end.
+ */
+static void kvm_pending_exit_planes(struct kvm_vcpu *vcpu, u16 *higher,
+				    u16 *lower)
+{
+	struct kvm_vcpu_common *common = vcpu->common;
+	unsigned int i;
+
+	*higher = 0;
+	*lower = 0;
+
+	for (i = 0; i < KVM_MAX_PLANES; i++) {
+		struct kvm_vcpu *v = common->vcpus[i];
+		bool pending;
+
+		if (!v || i == vcpu->plane_level)
+			continue;
+
+		pending = kvm_plane_has_interrupt(v, i < vcpu->plane_level);
+		if (i > vcpu->plane_level) {
+			if (pending)
+				*higher |= BIT(i);
+		} else if (!pending) {
+			vcpu->arch.lower_intr_reported &= ~BIT(i);
+		} else if (!(vcpu->arch.lower_intr_reported & BIT(i))) {
+			*lower |= BIT(i);
+		}
+	}
+}
+
+static bool kvm_has_pending_exit_planes(struct kvm_vcpu *vcpu)
+{
+	u16 higher, lower;
+
+	if (kvm_arch_max_planes(vcpu->kvm) <= 1)
+		return false;
+
+	kvm_pending_exit_planes(vcpu, &higher, &lower);
+	return higher || lower;
+}
+
+/* Returns 0 when a KVM_EXIT_PLANE_EVENT was filled in, 1 to run the guest. */
+static int kvm_check_plane_events(struct kvm_vcpu *vcpu)
+{
+	struct kvm_run *run = vcpu->run;
+	u16 higher, lower;
+
+	if (kvm_arch_max_planes(vcpu->kvm) <= 1)
+		return 1;
+
+	kvm_pending_exit_planes(vcpu, &higher, &lower);
+	if (!higher && !lower)
+		return 1;
+
+	run->exit_reason = KVM_EXIT_PLANE_EVENT;
+	memset(&run->plane_event, 0, sizeof(run->plane_event));
+	run->plane_event.plane = vcpu->plane_level;
+	if (higher) {
+		run->plane_event.cause = KVM_PLANE_EVENT_INTERRUPT;
+		run->plane_event.extra[0] = higher;
+	} else {
+		run->plane_event.cause = KVM_PLANE_EVENT_LOWER_INTERRUPT;
+		run->plane_event.extra[0] = lower;
+		vcpu->arch.lower_intr_reported |= lower;
+	}
+
+	return 0;
+}
+
 /**
  * kvm_arch_vcpu_runnable - determine if the vcpu can be scheduled
  * @v:		The VCPU pointer
@@ -855,8 +956,11 @@ int kvm_arch_vcpu_runnable(struct kvm_vcpu *v)
 		      (kvm_timer_should_notify_user(v) ||
 		       kvm_pmu_should_notify_user(v)));
 
+	if (kvm_has_pending_exit_planes(v))
+		return true;
+
 	return ((irq_lines || kvm_vgic_vcpu_pending_irq(v))
-		&& !kvm_arm_vcpu_stopped(v) && !v->arch.pause);
+		&& !kvm_arm_vcpu_stopped(v) && !v->common->arch.pause);
 }
 
 bool kvm_arch_vcpu_in_kernel(struct kvm_vcpu *vcpu)
@@ -1042,7 +1146,7 @@ void kvm_arm_halt_guest(struct kvm *kvm)
 	struct kvm_vcpu *vcpu;
 
 	kvm_for_each_vcpu(i, vcpu, kvm)
-		vcpu->arch.pause = true;
+		vcpu->common->arch.pause = true;
 	kvm_make_all_cpus_request(kvm, KVM_REQ_SLEEP);
 }
 
@@ -1052,7 +1156,7 @@ void kvm_arm_resume_guest(struct kvm *kvm)
 	struct kvm_vcpu *vcpu;
 
 	kvm_for_each_vcpu(i, vcpu, kvm) {
-		vcpu->arch.pause = false;
+		vcpu->common->arch.pause = false;
 		__kvm_vcpu_wake_up(vcpu);
 	}
 }
@@ -1062,10 +1166,10 @@ static void kvm_vcpu_sleep(struct kvm_vcpu *vcpu)
 	struct rcuwait *wait = kvm_arch_vcpu_get_wait(vcpu);
 
 	rcuwait_wait_event(wait,
-			   (!kvm_arm_vcpu_stopped(vcpu)) && (!vcpu->arch.pause),
+			   (!kvm_arm_vcpu_stopped(vcpu)) && (!vcpu->common->arch.pause),
 			   TASK_INTERRUPTIBLE);
 
-	if (kvm_arm_vcpu_stopped(vcpu) || vcpu->arch.pause) {
+	if (kvm_arm_vcpu_stopped(vcpu) || vcpu->common->arch.pause) {
 		/* Awaken to handle a signal, request we sleep again later. */
 		kvm_make_request(KVM_REQ_SLEEP, vcpu);
 	}
@@ -1196,6 +1300,11 @@ static int check_vcpu_requests(struct kvm_vcpu *vcpu)
 		if (kvm_check_request(KVM_REQ_SUSPEND, vcpu))
 			return kvm_vcpu_suspend(vcpu);
 
+		if (kvm_check_request(KVM_REQ_PLANE_RESCHED, vcpu)) {
+			vcpu->common->plane_switch = true;
+			return 0;
+		}
+
 		if (kvm_dirty_ring_check_request(vcpu))
 			return 0;
 
@@ -1280,20 +1389,17 @@ static int noinstr kvm_arm_vcpu_enter_exit(struct kvm_vcpu *vcpu)
 	return ret;
 }
 
-/**
- * kvm_arch_vcpu_ioctl_run - the main VCPU run function to execute guest code
- * @vcpu:	The VCPU pointer
- *
- * This function is called through the VCPU_RUN ioctl called from user space. It
- * will execute VM code in a loop until the time slice for the process is used
- * or some emulation is needed from user space in which case the function will
- * return with return value 0 and with the kvm_run structure filled in with the
- * required data for the requested emulation.
- */
-int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
+/* Run one plane vCPU; see kvm_arch_vcpu_ioctl_run() for the contract. */
+static int __kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
 {
 	struct kvm_run *run = vcpu->run;
 	int ret;
+
+	if (vcpu->plane_level) {
+		ret = kvm_arm_vcpu_first_run(vcpu);
+		if (ret)
+			return ret;
+	}
 
 	if (run->exit_reason == KVM_EXIT_MMIO) {
 		ret = kvm_handle_mmio_return(vcpu);
@@ -1325,6 +1431,9 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
 
 		if (ret > 0)
 			ret = check_vcpu_requests(vcpu);
+
+		if (ret > 0)
+			ret = kvm_check_plane_events(vcpu);
 
 		/*
 		 * Preparing the interrupts to be injected also
@@ -1481,6 +1590,38 @@ out:
 		kvm_call_hyp(__kvm_adjust_pc, vcpu);
 
 	vcpu_put(vcpu);
+	return ret;
+}
+
+/**
+ * kvm_arch_vcpu_ioctl_run - the main VCPU run function to execute guest code
+ * @vcpu_plane0:	The plane-0 VCPU pointer
+ *
+ * This function is called through the VCPU_RUN ioctl called from user space.
+ * It runs the lowest runnable plane (see KVM_SET_PLANE_RUN_STATE) in a loop
+ * until the time slice for the process is used or some emulation is needed
+ * from user space in which case the function will return with return value 0
+ * and with the kvm_run structure filled in with the required data for the
+ * requested emulation.
+ */
+int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu_plane0)
+{
+	struct kvm_vcpu_common *common = vcpu_plane0->common;
+	struct kvm_vcpu *vcpu;
+	int ret;
+
+	do {
+		vcpu = kvm_vcpu_select_plane(vcpu_plane0);
+		if (!vcpu)
+			return -EINVAL;
+
+		common->plane_switch = false;
+
+		ret = __kvm_arch_vcpu_ioctl_run(vcpu);
+		if (ret)
+			break;
+	} while (common->plane_switch);
+
 	return ret;
 }
 
@@ -1765,8 +1906,10 @@ static int kvm_arch_vcpu_ioctl_vcpu_init(struct kvm_vcpu *vcpu,
 	 * ensuring that the data side is always coherent. We still
 	 * need to invalidate the I-cache though, as FWB does *not*
 	 * imply CTR_EL0.DIC.
+	 *
+	 * A plane vCPU created after its VP ran is not a reboot.
 	 */
-	if (vcpu_has_run_once(vcpu)) {
+	if (vcpu->arch.first_run_done) {
 		if (!cpus_have_final_cap(ARM64_HAS_STAGE2_FWB))
 			stage2_unmap_vm(vcpu->kvm);
 		else
@@ -1860,7 +2003,24 @@ static int kvm_arm_vcpu_set_events(struct kvm_vcpu *vcpu,
 
 bool kvm_arch_is_vcpu_plane_ioctl(unsigned ioctl)
 {
-	return false;
+	switch (ioctl) {
+	case KVM_ARM_VCPU_INIT:
+	case KVM_ARM_VCPU_FINALIZE:
+	case KVM_GET_ONE_REG:
+	case KVM_SET_ONE_REG:
+	case KVM_GET_REG_LIST:
+	case KVM_GET_MP_STATE:
+	case KVM_SET_MP_STATE:
+	case KVM_GET_VCPU_EVENTS:
+	case KVM_SET_VCPU_EVENTS:
+	case KVM_SET_GUEST_DEBUG:
+	case KVM_SET_DEVICE_ATTR:
+	case KVM_GET_DEVICE_ATTR:
+	case KVM_HAS_DEVICE_ATTR:
+		return true;
+	default:
+		return false;
+	}
 }
 
 long kvm_arch_vcpu_ioctl(struct file *filp,

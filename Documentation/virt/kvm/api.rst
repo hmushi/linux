@@ -6606,7 +6606,7 @@ KVM_S390_KEYOP_SSKE
 ----------------------
 
 :Capability: KVM_CAP_PLANES
-:Architectures: none
+:Architectures: x86, arm64
 :Type: vm ioctl
 :Parameters: plane id
 :Returns: a VM fd that can be used to control the new plane.
@@ -6633,6 +6633,30 @@ writes the instance belonging to the plane of the vCPU fd that performs
 it.  A migrating VMM must therefore save and restore these MSRs through
 a vCPU fd of every plane, not just plane 0.
 
+On arm64 the value is 1 with protected KVM (pKVM), and the architectural
+limit otherwise.  The planes of a vCPU share its MPIDR and the stage-2 page
+tables of the VM.  A plane vCPU takes KVM_ARM_VCPU_INIT, KVM_ARM_VCPU_FINALIZE,
+KVM_GET/SET_ONE_REG, KVM_GET_REG_LIST, KVM_GET/SET_MP_STATE,
+KVM_GET/SET_VCPU_EVENTS, KVM_SET_GUEST_DEBUG and the device attribute ioctls,
+and must be initialised before the plane runs.  With an in-kernel GICv3 the
+planes of a vCPU share one redistributor address; accesses to it, and the
+SGIs a plane sends, reach the vCPU of the accessing plane.  SPIs and LPIs
+reach plane 0.  Each plane has its own generic timers.
+
+Planes share APIC IDs.  An interrupt a plane sends, by IPI or through its
+SynIC, reaches the same plane of the target vCPU; this holds for IPI
+virtualization too, which gives every plane its own posted-interrupt
+descriptor table.
+
+The planes of a vCPU share its CPUID model, set through the plane 0 fd with
+KVM_SET_CPUID2.  The CPUID bits that follow a vCPU's own registers (OSXSAVE
+from CR4.OSXSAVE, OSPKE from CR4.PKE, the APIC enable, MWAIT from
+MISC_ENABLE, and the XSAVE area sizes from XCR0 and XSS) reflect the plane
+that executes CPUID, since every plane has these registers of its own.
+KVM_GET_CPUID2 returns them as plane 0 sees them.
+
+4.146 KVM_SET_PLANE_MEMORY_ATTRIBUTES
+-------------------------------------
 4.146 KVM_GET_PLANE_RUN_STATE / KVM_SET_PLANE_RUN_STATE
 --------------------------------------------------------
 
@@ -9934,7 +9958,10 @@ start in ESA mode.
 8.48 KVM_CAP_PLANE_MEMORY_OVERLAYS
 ----------------------------------
 
-:Architectures: x86
+:Architectures: x86, arm64
+:Type: vm
+:Parameters: args[0] must be 0
+:Returns: 0 on success, -EBUSY if a vCPU was already created
 
 A positive return from KVM_CHECK_EXTENSION(KVM_CAP_PLANE_MEMORY_OVERLAYS)
 announces two things:

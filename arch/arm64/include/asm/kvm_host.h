@@ -42,19 +42,25 @@
 #define KVM_VCPU_MAX_FEATURES 9
 #define KVM_VCPU_VALID_FEATURES	(BIT(KVM_VCPU_MAX_FEATURES) - 1)
 
+/*
+ * Requests that act on state a plane vCPU owns (its power state, its
+ * registers, its vGIC CPU interface, its PMU) are per plane.  The rest
+ * only make the thread leave the guest, or act on VM-wide state.
+ */
 #define KVM_REQ_SLEEP \
-	KVM_ARCH_REQ_FLAGS(0, KVM_REQUEST_WAIT | KVM_REQUEST_NO_WAKEUP)
+	KVM_ARCH_REQ_FLAGS(0, KVM_REQUEST_WAIT | KVM_REQUEST_NO_WAKEUP | \
+			   KVM_REQUEST_PER_PLANE)
 #define KVM_REQ_IRQ_PENDING		KVM_ARCH_REQ(1)
-#define KVM_REQ_VCPU_RESET		KVM_ARCH_REQ(2)
-#define KVM_REQ_RECORD_STEAL		KVM_ARCH_REQ(3)
-#define KVM_REQ_RELOAD_GICv4		KVM_ARCH_REQ(4)
-#define KVM_REQ_RELOAD_PMU		KVM_ARCH_REQ(5)
-#define KVM_REQ_SUSPEND			KVM_ARCH_REQ(6)
-#define KVM_REQ_RESYNC_PMU_EL0		KVM_ARCH_REQ(7)
+#define KVM_REQ_VCPU_RESET		KVM_ARCH_PLANE_REQ(2)
+#define KVM_REQ_RECORD_STEAL		KVM_ARCH_PLANE_REQ(3)
+#define KVM_REQ_RELOAD_GICv4		KVM_ARCH_PLANE_REQ(4)
+#define KVM_REQ_RELOAD_PMU		KVM_ARCH_PLANE_REQ(5)
+#define KVM_REQ_SUSPEND			KVM_ARCH_PLANE_REQ(6)
+#define KVM_REQ_RESYNC_PMU_EL0		KVM_ARCH_PLANE_REQ(7)
 #define KVM_REQ_NESTED_S2_UNMAP		KVM_ARCH_REQ(8)
 #define KVM_REQ_GUEST_HYP_IRQ_PENDING	KVM_ARCH_REQ(9)
 #define KVM_REQ_MAP_L1_VNCR_EL2		KVM_ARCH_REQ(10)
-#define KVM_REQ_VGIC_PROCESS_UPDATE	KVM_ARCH_REQ(11)
+#define KVM_REQ_VGIC_PROCESS_UPDATE	KVM_ARCH_PLANE_REQ(11)
 
 #define KVM_DIRTY_LOG_MANUAL_CAPS   (KVM_DIRTY_LOG_MANUAL_PROTECT_ENABLE | \
 				     KVM_DIRTY_LOG_INITIALLY_SET)
@@ -317,6 +323,7 @@ static inline int kvm_arch_plane_init(struct kvm *kvm,
 }
 
 static inline void kvm_arch_plane_destroy(struct kvm_plane *plane) {}
+
 
 struct kvm_arch {
 	struct kvm_s2_mmu mmu;
@@ -872,9 +879,19 @@ struct vcpu_reset_state {
 
 struct vncr_tlb;
 
+/* State of a VP that its planes share: one thread, one pause request. */
 struct kvm_vcpu_arch_common {
 	/* Plane whose HVC immediate exit awaits completion, or -1 */
 	s8 hvc_imm_exit_plane;
+
+	/*
+	 * Don't run the guest (internal implementation need).
+	 *
+	 * Contrary to the vcpu flags, this is set/cleared outside of
+	 * a vcpu context, and thus cannot be mixed with the flags
+	 * themselves (or the flag accesses need to be made atomic).
+	 */
+	bool pause;
 };
 
 static inline int kvm_arch_vcpu_common_init(struct kvm_vcpu_common *common) { return 0; }
@@ -922,14 +939,8 @@ struct kvm_vcpu_arch {
 	/* State flags for kernel bookkeeping, unused by the hypervisor code */
 	u16 sflags;
 
-	/*
-	 * Don't run the guest (internal implementation need).
-	 *
-	 * Contrary to the flags above, this is set/cleared outside of
-	 * a vcpu context, and thus cannot be mixed with the flags
-	 * themselves (or the flag accesses need to be made atomic).
-	 */
-	bool pause;
+	/* Lower planes already reported as KVM_PLANE_EVENT_LOWER_INTERRUPT */
+	u16 lower_intr_reported;
 
 	/* Per-vCPU first-run setup done (planes other than 0 do it lazily). */
 	bool first_run_done;

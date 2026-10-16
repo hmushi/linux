@@ -103,7 +103,8 @@ static __always_inline bool vcpu_el1_is_32bit(struct kvm_vcpu *vcpu)
 
 static inline void vcpu_reset_hcr(struct kvm_vcpu *vcpu)
 {
-	if (!vcpu_has_run_once(vcpu))
+	/* Per vCPU: a plane vCPU may be created after its VP's thread ran. */
+	if (!vcpu->arch.first_run_done)
 		vcpu->arch.hcr_el2 = HCR_GUEST_FLAGS;
 
 	/*
