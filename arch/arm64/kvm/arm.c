@@ -1659,8 +1659,8 @@ static int vcpu_interrupt_line(struct kvm_vcpu *vcpu, int number, bool level)
 	return 0;
 }
 
-int kvm_vm_ioctl_irq_line(struct kvm *kvm, struct kvm_irq_level *irq_level,
-			  bool line_status)
+static int __kvm_vm_ioctl_irq_line(struct kvm *kvm, struct kvm_plane *plane,
+				   struct kvm_irq_level *irq_level)
 {
 	unsigned int irq_type, vcpu_id, irq_num;
 	struct kvm_vcpu *vcpu = NULL;
@@ -1674,6 +1674,10 @@ int kvm_vm_ioctl_irq_line(struct kvm *kvm, struct kvm_irq_level *irq_level,
 	irq_num = (irq >> KVM_ARM_IRQ_NUM_SHIFT) & KVM_ARM_IRQ_NUM_MASK;
 
 	trace_kvm_irq_line(irq_type, vcpu_id, irq_num, irq_level->level);
+
+	/* Only a PPI is private to a plane; SPIs and the CPU lines are plane 0's. */
+	if (plane->level && irq_type != KVM_ARM_IRQ_TYPE_PPI)
+		return -EINVAL;
 
 	switch (irq_type) {
 	case KVM_ARM_IRQ_TYPE_CPU:
@@ -1692,7 +1696,7 @@ int kvm_vm_ioctl_irq_line(struct kvm *kvm, struct kvm_irq_level *irq_level,
 		if (!irqchip_in_kernel(kvm))
 			return -ENXIO;
 
-		vcpu = kvm_get_vcpu_by_id(kvm, vcpu_id);
+		vcpu = plane_get_vcpu_by_id(plane, vcpu_id);
 		if (!vcpu)
 			return -EINVAL;
 
@@ -1732,6 +1736,22 @@ int kvm_vm_ioctl_irq_line(struct kvm *kvm, struct kvm_irq_level *irq_level,
 	}
 
 	return -EINVAL;
+}
+
+int kvm_vm_ioctl_irq_line(struct kvm *kvm, struct kvm_irq_level *irq_level,
+			  bool line_status)
+{
+	return __kvm_vm_ioctl_irq_line(kvm, kvm->planes[0], irq_level);
+}
+
+/*
+ * KVM_IRQ_LINE on a plane fd: the PPI reaches the vCPU of that plane, whose
+ * redistributor holds its own private interrupt state.
+ */
+int kvm_arch_plane_irq_line(struct kvm_plane *plane,
+			    struct kvm_irq_level *irq_level)
+{
+	return __kvm_vm_ioctl_irq_line(plane->kvm, plane, irq_level);
 }
 
 static unsigned long system_supported_vcpu_features(void)

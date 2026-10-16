@@ -5448,6 +5448,12 @@ out:
 }
 #endif
 
+int __weak kvm_arch_plane_irq_line(struct kvm_plane *plane,
+				   struct kvm_irq_level *irq_level)
+{
+	return -ENOTTY;
+}
+
 static long __kvm_plane_ioctl(struct kvm_plane *plane, unsigned int ioctl, unsigned long arg)
 {
 	long r;
@@ -5456,6 +5462,17 @@ static long __kvm_plane_ioctl(struct kvm_plane *plane, unsigned int ioctl, unsig
 	case KVM_CREATE_VCPU:
 		r = kvm_plane_ioctl_create_vcpu(plane, arg);
 		break;
+#ifdef __KVM_HAVE_IRQ_LINE
+	case KVM_IRQ_LINE: {
+		void __user *argp = (void __user *)arg;
+		struct kvm_irq_level irq_event;
+
+		if (copy_from_user(&irq_event, argp, sizeof(irq_event)))
+			return -EFAULT;
+		r = kvm_arch_plane_irq_line(plane, &irq_event);
+		break;
+	}
+#endif
 #ifdef CONFIG_HAVE_KVM_MSI
 	case KVM_SIGNAL_MSI: {
 		void __user *argp = (void __user *)arg;

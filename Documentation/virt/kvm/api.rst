@@ -960,6 +960,11 @@ Note that on arm64, the KVM_CAP_IRQCHIP capability only conditions
 injection of interrupts for the in-kernel irqchip. KVM_IRQ_LINE can always
 be used for a userspace interrupt controller.
 
+On arm64 a plane fd (see KVM_CREATE_PLANE) accepts KVM_IRQ_LINE for
+KVM_ARM_IRQ_TYPE_PPI only: the PPI reaches the vCPU of that plane, whose
+redistributor holds its own private interrupt state.  SPIs and the CPU
+lines belong to plane 0 and are refused with EINVAL on another plane's fd.
+
 ::
 
   struct kvm_irq_level {
@@ -6641,7 +6646,8 @@ KVM_GET/SET_VCPU_EVENTS, KVM_SET_GUEST_DEBUG and the device attribute ioctls,
 and must be initialised before the plane runs.  With an in-kernel GICv3 the
 planes of a vCPU share one redistributor address; accesses to it, and the
 SGIs a plane sends, reach the vCPU of the accessing plane.  SPIs and LPIs
-reach plane 0.  Each plane has its own generic timers.
+reach plane 0; a PPI injected with KVM_IRQ_LINE on a plane fd reaches that
+plane's vCPU.  Each plane has its own generic timers.
 
 Planes share APIC IDs.  An interrupt a plane sends, by IPI or through its
 SynIC, reaches the same plane of the target vCPU; this holds for IPI

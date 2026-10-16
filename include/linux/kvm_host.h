@@ -1832,6 +1832,8 @@ int kvm_get_dirty_log(struct kvm *kvm, struct kvm_dirty_log *log,
 
 int kvm_vm_ioctl_irq_line(struct kvm *kvm, struct kvm_irq_level *irq_level,
 			bool line_status);
+int kvm_arch_plane_irq_line(struct kvm_plane *plane,
+			    struct kvm_irq_level *irq_level);
 int kvm_vm_ioctl_enable_cap(struct kvm *kvm,
 			    struct kvm_enable_cap *cap);
 int kvm_arch_vm_ioctl(struct file *filp, unsigned int ioctl, unsigned long arg);
