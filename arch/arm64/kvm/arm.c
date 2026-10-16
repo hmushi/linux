@@ -928,9 +928,13 @@ out:
  * run for the first time, as well as the updates that must be
  * performed each time we get a new thread dealing with this vcpu.
  */
-int kvm_arch_vcpu_run_pid_change(struct kvm_vcpu *vcpu)
+/*
+ * Per-vCPU setup that must follow KVM_ARM_VCPU_INIT and precede the first
+ * entry.  Plane 0 does it when its thread first runs; another plane does
+ * it the first time it is selected, since it may be created after that.
+ */
+static int kvm_arm_vcpu_first_run(struct kvm_vcpu *vcpu)
 {
-	struct kvm *kvm = vcpu->kvm;
 	int ret;
 
 	if (!kvm_vcpu_initialized(vcpu))
@@ -939,20 +943,8 @@ int kvm_arch_vcpu_run_pid_change(struct kvm_vcpu *vcpu)
 	if (!kvm_arm_vcpu_is_finalized(vcpu))
 		return -EPERM;
 
-	if (likely(vcpu_has_run_once(vcpu)))
+	if (vcpu->arch.first_run_done)
 		return 0;
-
-	kvm_init_mpidr_data(kvm);
-
-	if (likely(irqchip_in_kernel(kvm))) {
-		/*
-		 * Map the VGIC hardware resources before running a vcpu the
-		 * first time on this VM.
-		 */
-		ret = kvm_vgic_map_resources(kvm);
-		if (ret)
-			return ret;
-	}
 
 	ret = kvm_finalize_sys_regs(vcpu);
 	if (ret)
@@ -983,6 +975,40 @@ int kvm_arch_vcpu_run_pid_change(struct kvm_vcpu *vcpu)
 		if (ret)
 			return ret;
 	}
+
+	vcpu->arch.first_run_done = true;
+	return 0;
+}
+
+int kvm_arch_vcpu_run_pid_change(struct kvm_vcpu *vcpu)
+{
+	struct kvm *kvm = vcpu->kvm;
+	int ret;
+
+	if (!kvm_vcpu_initialized(vcpu))
+		return -ENOEXEC;
+
+	if (!kvm_arm_vcpu_is_finalized(vcpu))
+		return -EPERM;
+
+	if (likely(vcpu_has_run_once(vcpu)))
+		return 0;
+
+	kvm_init_mpidr_data(kvm);
+
+	if (likely(irqchip_in_kernel(kvm))) {
+		/*
+		 * Map the VGIC hardware resources before running a vcpu the
+		 * first time on this VM.
+		 */
+		ret = kvm_vgic_map_resources(kvm);
+		if (ret)
+			return ret;
+	}
+
+	ret = kvm_arm_vcpu_first_run(vcpu);
+	if (ret)
+		return ret;
 
 	ret = vgic_v5_finalize_ppi_state(kvm);
 	if (ret)

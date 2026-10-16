@@ -931,6 +931,9 @@ struct kvm_vcpu_arch {
 	 */
 	bool pause;
 
+	/* Per-vCPU first-run setup done (planes other than 0 do it lazily). */
+	bool first_run_done;
+
 	/*
 	 * We maintain more than a single set of debug registers to support
 	 * debugging the guest from the host and to maintain separate host and
