@@ -649,6 +649,17 @@ static int vgic_v3_set_attr(struct kvm_device *dev,
 		dev->kvm->arch.vgic.mi_intid = val;
 		return 0;
 	}
+	case KVM_DEV_ARM_VGIC_GRP_CTRL:
+		if (attr->attr == KVM_DEV_ARM_VGIC_CTRL_SECURITY_EXTN) {
+			/* GICD_TYPER is fixed once the guest can read it */
+			guard(mutex)(&dev->kvm->arch.config_lock);
+			if (vgic_initialized(dev->kvm))
+				return -EBUSY;
+
+			dev->kvm->arch.vgic.security_extn = true;
+			return 0;
+		}
+		return vgic_set_common_attr(dev, attr);
 	default:
 		return vgic_set_common_attr(dev, attr);
 	}
@@ -705,6 +716,8 @@ static int vgic_v3_has_attr(struct kvm_device *dev,
 		case KVM_DEV_ARM_VGIC_CTRL_INIT:
 			return 0;
 		case KVM_DEV_ARM_VGIC_SAVE_PENDING_TABLES:
+			return 0;
+		case KVM_DEV_ARM_VGIC_CTRL_SECURITY_EXTN:
 			return 0;
 		}
 	}

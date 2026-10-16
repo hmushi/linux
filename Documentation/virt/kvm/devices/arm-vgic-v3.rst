@@ -308,6 +308,15 @@ Groups:
       save all LPI pending bits into guest RAM pending tables.
 
       The first kB of the pending table is not altered by this operation.
+    KVM_DEV_ARM_VGIC_CTRL_SECURITY_EXTN
+      present the distributor with two security states for guests that
+      require it, such as Windows under a Hyper-V identity. No parameter.
+      Must be set before KVM_DEV_ARM_VGIC_CTRL_INIT (-EBUSY afterwards).
+      Only GICD_TYPER changes: SecurityExtn reads 1. GICD_CTLR keeps
+      reporting DS set, ARE_NS set and bit 1 as the Group 1 enable, so the
+      single-security-state behaviour of every other register is unchanged;
+      the guest is expected to be the Non-secure side and to leave every
+      interrupt in Group 1, which is the vGIC's default.
 
   Errors:
 

@@ -81,6 +81,7 @@
 
 #define GICD_TYPER_RSS			(1U << 26)
 #define GICD_TYPER_LPIS			(1U << 17)
+#define GICD_TYPER_SecurityExtn		(1U << 10)
 #define GICD_TYPER_MBIS			(1U << 16)
 #define GICD_TYPER_ESPI			(1U << 8)
 

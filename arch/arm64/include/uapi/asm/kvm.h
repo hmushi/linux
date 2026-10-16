@@ -429,6 +429,7 @@ enum {
 #define   KVM_DEV_ARM_VGIC_SAVE_PENDING_TABLES	3
 #define   KVM_DEV_ARM_ITS_CTRL_RESET		4
 #define   KVM_DEV_ARM_VGIC_USERSPACE_PPIS	5
+#define   KVM_DEV_ARM_VGIC_CTRL_SECURITY_EXTN	6
 
 /* Device Control API on vcpu fd */
 #define KVM_ARM_VCPU_PMU_V3_CTRL	0

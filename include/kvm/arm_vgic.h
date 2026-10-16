@@ -408,6 +408,9 @@ struct vgic_dist {
 	/* Wants SGIs without active state */
 	bool			nassgireq;
 
+	/* GICv3: GICD_TYPER.SecurityExtn reads 1 (userspace opt-in) */
+	bool			security_extn;
+
 	struct vgic_irq		*spis;
 
 	struct vgic_io_device	dist_iodev;
