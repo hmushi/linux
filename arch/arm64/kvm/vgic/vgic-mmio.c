@@ -1039,6 +1039,18 @@ int vgic_uaccess(struct kvm_vcpu *vcpu, struct vgic_io_device *dev,
 		return vgic_uaccess_read(vcpu, dev, offset, val);
 }
 
+/*
+ * The redistributor of a VP as seen from the plane of the accessing vCPU.
+ * A VP without a vCPU in that plane shows its plane-0 redistributor.
+ */
+static struct kvm_vcpu *vgic_redist_vcpu(struct vgic_io_device *iodev,
+					 struct kvm_vcpu *vcpu)
+{
+	struct kvm_vcpu *r_vcpu = iodev->redist_vcpu;
+
+	return vgic_plane_vcpu(r_vcpu, vcpu) ?: r_vcpu;
+}
+
 static int dispatch_mmio_read(struct kvm_vcpu *vcpu, struct kvm_io_device *dev,
 			      gpa_t addr, int len, void *val)
 {
@@ -1060,7 +1072,7 @@ static int dispatch_mmio_read(struct kvm_vcpu *vcpu, struct kvm_io_device *dev,
 		data = region->read(vcpu, addr, len);
 		break;
 	case IODEV_REDIST:
-		data = region->read(iodev->redist_vcpu, addr, len);
+		data = region->read(vgic_redist_vcpu(iodev, vcpu), addr, len);
 		break;
 	case IODEV_ITS:
 		data = region->its_read(vcpu->kvm, iodev->its, addr, len);
@@ -1090,7 +1102,7 @@ static int dispatch_mmio_write(struct kvm_vcpu *vcpu, struct kvm_io_device *dev,
 		region->write(vcpu, addr, len, data);
 		break;
 	case IODEV_REDIST:
-		region->write(iodev->redist_vcpu, addr, len, data);
+		region->write(vgic_redist_vcpu(iodev, vcpu), addr, len, data);
 		break;
 	case IODEV_ITS:
 		region->its_write(vcpu->kvm, iodev->its, addr, len, data);

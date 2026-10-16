@@ -321,7 +321,8 @@ static void vgic_mmio_write_v3r_ctlr(struct kvm_vcpu *vcpu,
 static bool vgic_mmio_vcpu_rdist_is_last(struct kvm_vcpu *vcpu)
 {
 	struct vgic_dist *vgic = &vcpu->kvm->arch.vgic;
-	struct vgic_cpu *vgic_cpu = &vcpu->arch.vgic_cpu;
+	/* The redistributor slot belongs to the VP; plane 0 registered it. */
+	struct vgic_cpu *vgic_cpu = &kvm_vcpu_plane(vcpu, 0)->arch.vgic_cpu;
 	struct vgic_redist_region *iter, *rdreg = vgic_cpu->rdreg;
 
 	if (!rdreg)
@@ -1120,11 +1121,13 @@ void vgic_v3_dispatch_sgi(struct kvm_vcpu *vcpu, u64 reg, bool allow_group1)
 
 	sgi = FIELD_GET(ICC_SGI1R_SGI_ID_MASK, reg);
 
-	/* Broadcast */
+	/* Broadcast; an SGI reaches the sender's plane of each target. */
 	if (unlikely(reg & BIT_ULL(ICC_SGI1R_IRQ_ROUTING_MODE_BIT))) {
 		kvm_for_each_vcpu(c, c_vcpu, kvm) {
+			c_vcpu = vgic_plane_vcpu(c_vcpu, vcpu);
+
 			/* Don't signal the calling VCPU */
-			if (c_vcpu == vcpu)
+			if (!c_vcpu || c_vcpu == vcpu)
 				continue;
 
 			vgic_v3_queue_sgi(c_vcpu, sgi, allow_group1);
@@ -1141,6 +1144,8 @@ void vgic_v3_dispatch_sgi(struct kvm_vcpu *vcpu, u64 reg, bool allow_group1)
 
 	for_each_set_bit(aff0, &target_cpus, hweight_long(ICC_SGI1R_TARGET_LIST_MASK)) {
 		c_vcpu = kvm_mpidr_to_vcpu(kvm, mpidr | aff0);
+		if (c_vcpu)
+			c_vcpu = vgic_plane_vcpu(c_vcpu, vcpu);
 		if (c_vcpu)
 			vgic_v3_queue_sgi(c_vcpu, sgi, allow_group1);
 	}

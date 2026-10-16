@@ -495,4 +495,20 @@ static inline bool vgic_supports_direct_irqs(struct kvm *kvm)
 int vgic_its_debug_init(struct kvm_device *dev);
 void vgic_its_debug_destroy(struct kvm_device *dev);
 
+/*
+ * The vCPU of @vcpu's VP in the plane @from runs in: the redistributor and
+ * the SGIs are per plane, the distributor is shared.  NULL if that VP has no
+ * vCPU in that plane.
+ */
+static inline struct kvm_vcpu *vgic_plane_vcpu(struct kvm_vcpu *vcpu,
+					       struct kvm_vcpu *from)
+{
+	return kvm_vcpu_plane(vcpu, from->plane_level);
+}
+
+/* Iterate the vCPUs of every plane; @vcpu0 walks plane 0, @vcpu the planes. */
+#define vgic_for_each_plane_vcpu(kvm, idx, vcpu0, lvl, vcpu)		\
+	kvm_for_each_vcpu(idx, vcpu0, kvm)				\
+		vcpu_for_each_plane((vcpu0)->common, lvl, vcpu)
+
 #endif

@@ -148,6 +148,11 @@ static void vgic_mmio_write_sgir(struct kvm_vcpu *source_vcpu,
 		if (!(targets & (1U << c)))
 			continue;
 
+		/* An SGI reaches the sender's plane of the target. */
+		vcpu = vgic_plane_vcpu(vcpu, source_vcpu);
+		if (!vcpu)
+			continue;
+
 		irq = vgic_get_vcpu_irq(vcpu, intid);
 
 		raw_spin_lock_irqsave(&irq->irq_lock, flags);

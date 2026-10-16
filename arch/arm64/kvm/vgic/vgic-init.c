@@ -70,8 +70,9 @@ static int vgic_allocate_private_irqs_locked(struct kvm_vcpu *vcpu, u32 type);
  */
 int kvm_vgic_create(struct kvm *kvm, u32 type)
 {
-	struct kvm_vcpu *vcpu;
+	struct kvm_vcpu *vcpu, *vcpu0;
 	unsigned long i;
+	int lvl;
 	int ret;
 
 	/*
@@ -162,14 +163,15 @@ int kvm_vgic_create(struct kvm *kvm, u32 type)
 	 */
 	kvm_vgic_finalize_idregs(kvm);
 
-	kvm_for_each_vcpu(i, vcpu, kvm) {
+	vgic_for_each_plane_vcpu(kvm, i, vcpu0, lvl, vcpu) {
 		ret = vgic_allocate_private_irqs_locked(vcpu, type);
 		if (ret)
-			break;
+			goto out_free_irqs;
 	}
 
+out_free_irqs:
 	if (ret) {
-		kvm_for_each_vcpu(i, vcpu, kvm) {
+		vgic_for_each_plane_vcpu(kvm, i, vcpu0, lvl, vcpu) {
 			struct vgic_cpu *vgic_cpu = &vcpu->arch.vgic_cpu;
 			kfree(vgic_cpu->private_irqs);
 			vgic_cpu->private_irqs = NULL;
@@ -374,6 +376,8 @@ static int vgic_allocate_private_irqs(struct kvm_vcpu *vcpu, u32 type)
 	return ret;
 }
 
+static void kvm_vgic_vcpu_reset(struct kvm_vcpu *vcpu);
+
 /**
  * kvm_vgic_vcpu_init() - Initialize static VGIC VCPU data
  * structures and register VCPU-specific KVM iodevs
@@ -402,11 +406,17 @@ int kvm_vgic_vcpu_init(struct kvm_vcpu *vcpu)
 	if (ret)
 		return ret;
 
+	/* A plane vCPU created after vgic_init() missed its reset there. */
+	if (vcpu->plane_level && vgic_initialized(vcpu->kvm))
+		kvm_vgic_vcpu_reset(vcpu);
+
 	/*
 	 * If we are creating a VCPU with a GICv3 we must also register the
 	 * KVM io device for the redistributor that belongs to this VCPU.
+	 * The planes of a VP share one redistributor address: plane 0
+	 * registers it, accesses resolve to the accessing plane's vCPU.
 	 */
-	if (dist->vgic_model == KVM_DEV_TYPE_ARM_VGIC_V3) {
+	if (dist->vgic_model == KVM_DEV_TYPE_ARM_VGIC_V3 && !vcpu->plane_level) {
 		mutex_lock(&vcpu->kvm->slots_lock);
 		ret = vgic_register_redist_iodev(vcpu);
 		mutex_unlock(&vcpu->kvm->slots_lock);
@@ -438,8 +448,8 @@ static void kvm_vgic_vcpu_reset(struct kvm_vcpu *vcpu)
 int vgic_init(struct kvm *kvm)
 {
 	struct vgic_dist *dist = &kvm->arch.vgic;
-	struct kvm_vcpu *vcpu;
-	int ret = 0;
+	struct kvm_vcpu *vcpu, *vcpu0;
+	int ret = 0, lvl;
 	unsigned long idx;
 
 	lockdep_assert_held(&kvm->arch.config_lock);
@@ -475,7 +485,7 @@ int vgic_init(struct kvm *kvm)
 			return ret;
 	}
 
-	kvm_for_each_vcpu(idx, vcpu, kvm)
+	vgic_for_each_plane_vcpu(kvm, idx, vcpu0, lvl, vcpu)
 		kvm_vgic_vcpu_reset(vcpu);
 
 	ret = kvm_vgic_setup_default_irq_routing(kvm);
@@ -546,7 +556,8 @@ static void __kvm_vgic_vcpu_destroy(struct kvm_vcpu *vcpu)
 		 * kvm_vgic_destroy(), meaning it is both safe and necessary to
 		 * do so here.
 		 */
-		if (kvm_get_vcpu_by_id(vcpu->kvm, vcpu->vcpu_id) != vcpu)
+		if (!vcpu->plane_level &&
+		    kvm_get_vcpu_by_id(vcpu->kvm, vcpu->vcpu_id) != vcpu)
 			vgic_unregister_redist_iodev(vcpu);
 
 		vgic_cpu->rd_iodev.base_addr = VGIC_ADDR_UNDEF;
@@ -564,15 +575,16 @@ void kvm_vgic_vcpu_destroy(struct kvm_vcpu *vcpu)
 
 void kvm_vgic_destroy(struct kvm *kvm)
 {
-	struct kvm_vcpu *vcpu;
+	struct kvm_vcpu *vcpu, *vcpu0;
 	unsigned long i;
+	int lvl;
 
 	mutex_lock(&kvm->slots_lock);
 	mutex_lock(&kvm->arch.config_lock);
 
 	vgic_debug_destroy(kvm);
 
-	kvm_for_each_vcpu(i, vcpu, kvm)
+	vgic_for_each_plane_vcpu(kvm, i, vcpu0, lvl, vcpu)
 		__kvm_vgic_vcpu_destroy(vcpu);
 
 	kvm_vgic_dist_destroy(kvm);

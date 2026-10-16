@@ -1295,6 +1295,9 @@ void kvm_arm_resume_guest(struct kvm *kvm);
 
 #define vcpu_has_run_once(vcpu)	(!!READ_ONCE((vcpu)->common->pid))
 
+/* The plane @level vCPU of the VP @vcpu belongs to, or NULL. */
+#define kvm_vcpu_plane(vcpu, level)	((vcpu)->common->vcpus[(level)])
+
 #ifndef __KVM_NVHE_HYPERVISOR__
 #define kvm_call_hyp_nvhe(f, ...)						\
 	({								\

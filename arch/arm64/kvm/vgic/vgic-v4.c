@@ -355,11 +355,17 @@ static inline bool vgic_v4_want_doorbell(struct kvm_vcpu *vcpu)
 	return vcpu_get_flag(vcpu, IN_NESTED_ERET);
 }
 
+/* Only plane 0 has a vPE: devices and their LPIs belong to plane 0. */
+static bool vgic_v4_vcpu_has_vpe(struct kvm_vcpu *vcpu)
+{
+	return vgic_supports_direct_irqs(vcpu->kvm) && !vcpu->plane_level;
+}
+
 int vgic_v4_put(struct kvm_vcpu *vcpu)
 {
 	struct its_vpe *vpe = &vcpu->arch.vgic_cpu.vgic_v3.its_vpe;
 
-	if (!vgic_supports_direct_irqs(vcpu->kvm) || !vpe->resident)
+	if (!vgic_v4_vcpu_has_vpe(vcpu) || !vpe->resident)
 		return 0;
 
 	return its_make_vpe_non_resident(vpe, vgic_v4_want_doorbell(vcpu));
@@ -370,7 +376,7 @@ int vgic_v4_load(struct kvm_vcpu *vcpu)
 	struct its_vpe *vpe = &vcpu->arch.vgic_cpu.vgic_v3.its_vpe;
 	int err;
 
-	if (!vgic_supports_direct_irqs(vcpu->kvm) || vpe->resident)
+	if (!vgic_v4_vcpu_has_vpe(vcpu) || vpe->resident)
 		return 0;
 
 	if (vcpu_get_flag(vcpu, IN_WFI))
@@ -409,7 +415,7 @@ void vgic_v4_commit(struct kvm_vcpu *vcpu)
 	 * No need to wait for the vPE to be ready across a shallow guest
 	 * exit, as only a vcpu_put will invalidate it.
 	 */
-	if (!vpe->ready)
+	if (vgic_v4_vcpu_has_vpe(vcpu) && !vpe->ready)
 		its_commit_vpe(vpe);
 }
 
