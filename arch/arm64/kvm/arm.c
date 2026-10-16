@@ -573,7 +573,7 @@ int kvm_arch_vcpu_create(struct kvm_vcpu *vcpu)
 
 	kvm_arm_pvtime_vcpu_init(&vcpu->arch);
 
-	vcpu->arch.hw_mmu = &vcpu->kvm->arch.mmu;
+	vcpu->arch.hw_mmu = kvm_plane_s2_mmu(vcpu->plane);
 
 	/*
 	 * This vCPU may have been created after mpidr_data was initialized.
@@ -1781,6 +1781,10 @@ static int kvm_vcpu_init_check_features(struct kvm_vcpu *vcpu,
 	 */
 	if (test_bit(KVM_ARM_VCPU_PTRAUTH_ADDRESS, &features) !=
 	    test_bit(KVM_ARM_VCPU_PTRAUTH_GENERIC, &features))
+		return -EINVAL;
+
+	/* Planes and nested virtualisation each expect to own hw_mmu. */
+	if (test_bit(KVM_ARM_VCPU_HAS_EL2, &features) && vcpu->kvm->has_planes)
 		return -EINVAL;
 
 	if (!test_bit(KVM_ARM_VCPU_EL1_32BIT, &features))

@@ -178,6 +178,7 @@ int kvm_arch_flush_remote_tlbs(struct kvm *kvm)
 		kvm_call_hyp_nvhe(__pkvm_tlb_flush_vmid, kvm->arch.pkvm.handle);
 	else
 		kvm_call_hyp(__kvm_tlb_flush_vmid, &kvm->arch.mmu);
+	kvm_planes_s2_flush_vmid(kvm);
 	return 0;
 }
 
@@ -191,6 +192,7 @@ int kvm_arch_flush_remote_tlbs_range(struct kvm *kvm,
 		kvm_call_hyp_nvhe(__pkvm_tlb_flush_vmid, kvm->arch.pkvm.handle);
 	else
 		kvm_tlb_flush_vmid_range(&kvm->arch.mmu, addr, size);
+	kvm_planes_s2_flush_vmid_range(kvm, addr, size);
 	return 0;
 }
 
@@ -381,6 +383,7 @@ static void stage2_flush_vm(struct kvm *kvm)
 		stage2_flush_memslot(kvm, memslot);
 
 	kvm_nested_s2_flush(kvm);
+	kvm_planes_s2_flush(kvm);
 
 	write_unlock(&kvm->mmu_lock);
 	srcu_read_unlock(&kvm->srcu, idx);
@@ -1025,6 +1028,181 @@ void kvm_uninit_stage2_mmu(struct kvm *kvm)
 	kvm_mmu_free_memory_cache(&kvm->arch.mmu.split_page_cache);
 }
 
+struct kvm_s2_mmu *kvm_plane_s2_mmu(struct kvm_plane *plane)
+{
+	return plane->level ? &plane->arch.mmu : &plane->kvm->arch.mmu;
+}
+
+/*
+ * The stage-2 table of plane @i, or NULL.  Plane 0's is kvm->arch.mmu and
+ * every caller handles it first.
+ */
+static struct kvm_s2_mmu *plane_s2_mmu_at(struct kvm *kvm, unsigned int i)
+{
+	struct kvm_plane *plane = kvm->planes[i];
+
+	if (!plane || !plane->arch.mmu.pgt)
+		return NULL;
+	return &plane->arch.mmu;
+}
+
+int kvm_arch_plane_init(struct kvm *kvm, struct kvm_plane *plane,
+			unsigned int plane_level)
+{
+	if (!plane_level)
+		return 0;
+
+	/* Planes and nested virtualisation each expect to own hw_mmu. */
+	if (test_bit(KVM_ARM_VCPU_HAS_EL2, kvm->arch.vcpu_features))
+		return -EINVAL;
+
+	return kvm_init_stage2_mmu(kvm, &plane->arch.mmu, kvm_get_pa_bits(kvm));
+}
+
+void kvm_arch_plane_destroy(struct kvm_plane *plane)
+{
+	if (!plane->level)
+		return;
+
+	kvm_free_stage2_pgd(&plane->arch.mmu);
+	kvm_mmu_free_memory_cache(&plane->arch.mmu.split_page_cache);
+}
+
+void kvm_planes_s2_flush_vmid(struct kvm *kvm)
+{
+	struct kvm_s2_mmu *mmu;
+	unsigned int i;
+
+	for (i = 1; i < KVM_MAX_PLANES; i++) {
+		mmu = plane_s2_mmu_at(kvm, i);
+		if (mmu)
+			kvm_call_hyp(__kvm_tlb_flush_vmid, mmu);
+	}
+}
+
+void kvm_planes_s2_flush_vmid_range(struct kvm *kvm, phys_addr_t addr, u64 size)
+{
+	struct kvm_s2_mmu *mmu;
+	unsigned int i;
+
+	for (i = 1; i < KVM_MAX_PLANES; i++) {
+		mmu = plane_s2_mmu_at(kvm, i);
+		if (mmu)
+			kvm_tlb_flush_vmid_range(mmu, addr, size);
+	}
+}
+
+void kvm_planes_s2_flush(struct kvm *kvm)
+{
+	struct kvm_s2_mmu *mmu;
+	unsigned int i;
+
+	lockdep_assert_held_write(&kvm->mmu_lock);
+
+	for (i = 1; i < KVM_MAX_PLANES; i++) {
+		mmu = plane_s2_mmu_at(kvm, i);
+		if (mmu)
+			kvm_stage2_flush_range(mmu, 0, kvm_phys_size(mmu));
+	}
+}
+
+void kvm_planes_s2_wp(struct kvm *kvm)
+{
+	struct kvm_s2_mmu *mmu;
+	unsigned int i;
+
+	lockdep_assert_held_write(&kvm->mmu_lock);
+
+	for (i = 1; i < KVM_MAX_PLANES; i++) {
+		mmu = plane_s2_mmu_at(kvm, i);
+		if (mmu)
+			kvm_stage2_wp_range(mmu, 0, kvm_phys_size(mmu));
+	}
+}
+
+void kvm_planes_s2_unmap(struct kvm *kvm, bool may_block)
+{
+	struct kvm_s2_mmu *mmu;
+	unsigned int i;
+
+	lockdep_assert_held_write(&kvm->mmu_lock);
+
+	for (i = 1; i < KVM_MAX_PLANES; i++) {
+		mmu = plane_s2_mmu_at(kvm, i);
+		if (mmu)
+			kvm_stage2_unmap_range(mmu, 0, kvm_phys_size(mmu), may_block);
+	}
+}
+
+void kvm_planes_s2_unmap_range(struct kvm *kvm, phys_addr_t start, u64 size,
+			       bool may_block)
+{
+	struct kvm_s2_mmu *mmu;
+	unsigned int i;
+
+	lockdep_assert_held_write(&kvm->mmu_lock);
+
+	for (i = 1; i < KVM_MAX_PLANES; i++) {
+		mmu = plane_s2_mmu_at(kvm, i);
+		if (mmu)
+			kvm_stage2_unmap_range(mmu, start, size, may_block);
+	}
+}
+
+/* A protection must keep read: no write-only or exec-only pages. */
+bool kvm_arch_mem_attributes_supported_prot(struct kvm *kvm, unsigned long attrs)
+{
+	unsigned long prot = (attrs & KVM_MEMORY_ATTRIBUTE_PROT) ^ KVM_MEMORY_ATTRIBUTE_PROT;
+
+	if (attrs & ~KVM_MEMORY_ATTRIBUTE_PROT)
+		return false;
+
+	return !prot || kvm_mem_attributes_may_read(attrs);
+}
+
+static bool plane_has_mem_attrs(struct kvm_plane *plane)
+{
+	return !xa_empty(kvm_plane_mem_attr_array(plane));
+}
+
+/*
+ * Memory attributes are per plane but the attribute update does not say
+ * which plane changed, so the range is unmapped from every plane's table;
+ * each re-faults against its own attributes. Called with mmu_lock held
+ * for write and the range already in the invalidation set.
+ */
+bool kvm_arch_pre_set_memory_attributes(struct kvm *kvm,
+					struct kvm_gfn_range *range)
+{
+	phys_addr_t start = range->start << PAGE_SHIFT;
+	phys_addr_t size = (range->end - range->start) << PAGE_SHIFT;
+	unsigned int i;
+
+	lockdep_assert_held_write(&kvm->mmu_lock);
+
+	for (i = 0; i < KVM_MAX_PLANES; i++) {
+		struct kvm_s2_mmu *mmu;
+
+		if (!kvm->planes[i])
+			continue;
+		mmu = kvm_plane_s2_mmu(kvm->planes[i]);
+		if (mmu->pgt)
+			kvm_stage2_unmap_range(mmu, start, size, range->may_block);
+	}
+
+	return true;
+}
+
+bool kvm_arch_post_set_memory_attributes(struct kvm *kvm,
+					 struct kvm_gfn_range *range)
+{
+	return false;
+}
+
+void kvm_arch_post_set_memory_attributes_unlocked(struct kvm *kvm)
+{
+}
+
 static void stage2_unmap_memslot(struct kvm *kvm,
 				 struct kvm_memory_slot *memslot)
 {
@@ -1089,6 +1267,7 @@ void stage2_unmap_vm(struct kvm *kvm)
 		stage2_unmap_memslot(kvm, memslot);
 
 	kvm_nested_s2_unmap(kvm, true);
+	kvm_planes_s2_unmap(kvm, true);
 
 	write_unlock(&kvm->mmu_lock);
 	mmap_read_unlock(current->mm);
@@ -1252,6 +1431,7 @@ static void kvm_mmu_wp_memory_region(struct kvm *kvm, int slot)
 	write_lock(&kvm->mmu_lock);
 	kvm_stage2_wp_range(&kvm->arch.mmu, start, end);
 	kvm_nested_s2_wp(kvm);
+	kvm_planes_s2_wp(kvm);
 	write_unlock(&kvm->mmu_lock);
 	kvm_flush_remote_tlbs_memslot(kvm, memslot);
 }
@@ -1319,6 +1499,7 @@ void kvm_arch_mmu_enable_log_dirty_pt_masked(struct kvm *kvm,
 		kvm_mmu_split_huge_pages(kvm, start, end);
 
 	kvm_nested_s2_wp(kvm);
+	kvm_planes_s2_wp(kvm);
 }
 
 static void kvm_send_hwpoison_signal(unsigned long address, short lsb)
@@ -1571,7 +1752,41 @@ struct kvm_s2_fault_desc {
 	struct kvm_s2_trans	*nested;
 	struct kvm_memory_slot	*memslot;
 	unsigned long		hva;
+	/* KVM_MEMORY_ATTRIBUTE_N{R,W,X} of the faulting plane for this gfn */
+	unsigned long		plane_attrs;
 };
+
+/* Drop the permissions the plane's access attributes deny. */
+static enum kvm_pgtable_prot plane_attrs_adjust_prot(unsigned long attrs,
+						     enum kvm_pgtable_prot prot)
+{
+	if (!kvm_mem_attributes_may_write(attrs))
+		prot &= ~KVM_PGTABLE_PROT_W;
+	if (!kvm_mem_attributes_may_exec(attrs))
+		prot &= ~KVM_PGTABLE_PROT_X;
+	return prot;
+}
+
+/*
+ * A plane's access attributes deny this fault: exit with the memory fault
+ * KVM_SET_PLANE_MEMORY_ATTRIBUTES documents, flagged as the plane's.
+ */
+static bool plane_attrs_deny_fault(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
+				   unsigned long attrs)
+{
+	bool write_fault = kvm_is_write_fault(vcpu);
+	bool exec_fault = kvm_vcpu_trap_is_exec_fault(vcpu);
+
+	if (kvm_mem_attributes_may_read(attrs) &&
+	    (!write_fault || kvm_mem_attributes_may_write(attrs)) &&
+	    (!exec_fault || kvm_mem_attributes_may_exec(attrs)))
+		return false;
+
+	kvm_prepare_memory_fault_exit(vcpu, fault_ipa & PAGE_MASK, PAGE_SIZE,
+				      write_fault, exec_fault, false);
+	vcpu->run->memory_fault.flags |= KVM_MEMORY_EXIT_FLAG_PLANE_PROT;
+	return true;
+}
 
 static int gmem_abort(const struct kvm_s2_fault_desc *s2fd)
 {
@@ -1624,6 +1839,8 @@ static int gmem_abort(const struct kvm_s2_fault_desc *s2fd)
 
 	if (exec_fault || cpus_have_final_cap(ARM64_HAS_CACHE_DIC))
 		prot |= KVM_PGTABLE_PROT_X;
+
+	prot = plane_attrs_adjust_prot(s2fd->plane_attrs, prot);
 
 	if (s2fd->nested)
 		prot = adjust_nested_exec_perms(kvm, s2fd->nested, prot);
@@ -1748,7 +1965,12 @@ static short kvm_s2_resolve_vma_size(const struct kvm_s2_fault_desc *s2fd,
 {
 	short vma_shift;
 
-	if (memslot_is_logging(s2fd->memslot)) {
+	/*
+	 * A plane with access attributes maps at page granule: a block would
+	 * span pages with different attributes.
+	 */
+	if (memslot_is_logging(s2fd->memslot) ||
+	    plane_has_mem_attrs(s2fd->vcpu->plane)) {
 		s2vi->max_map_size = PAGE_SIZE;
 		vma_shift = PAGE_SHIFT;
 	} else {
@@ -1971,6 +2193,8 @@ static int kvm_s2_fault_compute_prot(const struct kvm_s2_fault_desc *s2fd,
 
 	if (s2fd->nested)
 		*prot = adjust_nested_exec_perms(kvm, s2fd->nested, *prot);
+
+	*prot = plane_attrs_adjust_prot(s2fd->plane_attrs, *prot);
 
 	if (!kvm_s2_fault_is_perm(s2fd) && !s2vi->map_non_cacheable && kvm_has_mte(kvm)) {
 		/* Check the VMM hasn't introduced a new disallowed VMA */
@@ -2374,7 +2598,14 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
 		.nested		= nested,
 		.memslot	= memslot,
 		.hva		= hva,
+		.plane_attrs	= kvm_plane_get_memory_attributes(vcpu->plane, gfn),
 	};
+
+	if (s2fd.plane_attrs &&
+	    plane_attrs_deny_fault(vcpu, fault_ipa, s2fd.plane_attrs)) {
+		ret = -EFAULT;
+		goto out_unlock;
+	}
 
 	if (kvm_vm_is_protected(vcpu->kvm)) {
 		ret = pkvm_mem_abort(&s2fd);
@@ -2409,6 +2640,9 @@ bool kvm_unmap_gfn_range(struct kvm *kvm, struct kvm_gfn_range *range)
 			     range->may_block);
 
 	kvm_nested_s2_unmap(kvm, range->may_block);
+	kvm_planes_s2_unmap_range(kvm, range->start << PAGE_SHIFT,
+				  (range->end - range->start) << PAGE_SHIFT,
+				  range->may_block);
 	return false;
 }
 
@@ -2687,6 +2921,7 @@ void kvm_arch_flush_shadow_memslot(struct kvm *kvm,
 	write_lock(&kvm->mmu_lock);
 	kvm_stage2_unmap_range(&kvm->arch.mmu, gpa, size, true);
 	kvm_nested_s2_unmap(kvm, true);
+	kvm_planes_s2_unmap_range(kvm, gpa, size, true);
 	write_unlock(&kvm->mmu_lock);
 }
 

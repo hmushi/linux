@@ -312,17 +312,23 @@ enum fgt_group_id {
 	__NR_FGT_GROUP_IDS__
 };
 
-/* Per-plane state of VM */
-struct kvm_arch_plane {};
+/*
+ * Per-plane state of VM.  Every plane but plane 0 has a stage-2 table and
+ * VMID of its own, so a plane's access attributes shape only its own
+ * mappings; plane 0 uses kvm->arch.mmu.
+ */
+struct kvm_arch_plane {
+	struct kvm_s2_mmu mmu;
+};
 
-static inline int kvm_arch_plane_init(struct kvm *kvm,
-				      struct kvm_plane *plane,
-				      unsigned plane_level)
-{
-	return 0;
-}
+int kvm_arch_plane_init(struct kvm *kvm, struct kvm_plane *plane,
+			unsigned int plane_level);
+void kvm_arch_plane_destroy(struct kvm_plane *plane);
+struct kvm_s2_mmu *kvm_plane_s2_mmu(struct kvm_plane *plane);
 
-static inline void kvm_arch_plane_destroy(struct kvm_plane *plane) {}
+/* Protection attributes restrict a plane's stage-2; no private memory. */
+#define kvm_arch_has_memory_protection_attributes(kvm)	true
+#define kvm_arch_has_private_mem(kvm)			false
 
 
 struct kvm_arch {

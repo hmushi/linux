@@ -177,6 +177,13 @@ void kvm_stage2_wp_range(struct kvm_s2_mmu *mmu, phys_addr_t addr, phys_addr_t e
 void stage2_unmap_vm(struct kvm *kvm);
 int kvm_init_stage2_mmu(struct kvm *kvm, struct kvm_s2_mmu *mmu, unsigned long type);
 void kvm_uninit_stage2_mmu(struct kvm *kvm);
+void kvm_planes_s2_flush_vmid(struct kvm *kvm);
+void kvm_planes_s2_flush_vmid_range(struct kvm *kvm, phys_addr_t addr, u64 size);
+void kvm_planes_s2_flush(struct kvm *kvm);
+void kvm_planes_s2_wp(struct kvm *kvm);
+void kvm_planes_s2_unmap(struct kvm *kvm, bool may_block);
+void kvm_planes_s2_unmap_range(struct kvm *kvm, phys_addr_t start, u64 size,
+			       bool may_block);
 void kvm_free_stage2_pgd(struct kvm_s2_mmu *mmu);
 int kvm_phys_addr_ioremap(struct kvm *kvm, phys_addr_t guest_ipa,
 			  phys_addr_t pa, unsigned long size, bool writable);

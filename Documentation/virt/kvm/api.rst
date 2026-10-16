@@ -9977,6 +9977,19 @@ announces two things:
    ``KVM_CAP_ARM_HVC_IMM_EXITS``; the register copy between planes is
    userspace's.
 
+On arm64 every plane but plane 0 has a stage-2 translation table and VMID of
+its own, and ``KVM_CAP_PLANES`` implies that ``KVM_SET_PLANE_MEMORY_ATTRIBUTES``
+is live: a vCPU of a plane whose attributes deny its access exits with
+``KVM_EXIT_MEMORY_FAULT`` and ``KVM_MEMORY_EXIT_FLAG_PLANE_PROT``, as on x86.
+Planes and nested virtualisation exclude each other for now: creating a plane
+on a VM whose vCPUs have ``KVM_ARM_VCPU_HAS_EL2``, or initialising such a vCPU
+on a VM with planes, fails with EINVAL.
+
+The capability must be enabled before the first vCPU is created.  It does not
+change KVM_RUN on plane vCPU fds, which stays unsupported: all planes of a vCPU
+run from its plane-0 fd, so the thread, the signal mask and the kvm_run page
+are shared.
+
 9. Known KVM API problems
 =========================
 
