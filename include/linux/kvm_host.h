@@ -2914,6 +2914,11 @@ static inline u64 kvm_mem_attributes_generation(struct kvm *kvm)
 {
 	return 0;
 }
+static inline unsigned long kvm_plane_get_memory_attributes(struct kvm_plane *plane,
+							    gfn_t gfn)
+{
+	return 0;
+}
 #endif /* CONFIG_KVM_GENERIC_MEMORY_ATTRIBUTES */
 
 static inline int kvm_mem_attributes_may_read_gfn(struct kvm *kvm, gfn_t gfn)
