@@ -4779,7 +4779,14 @@ static int kvm_plane_ioctl_create_vcpu(struct kvm_plane *plane, unsigned long id
 		return -EINVAL;
 	}
 
-	r = kvm_arch_vcpu_precreate(kvm, id);
+	/*
+	 * The VM-level preconditions were checked, and the idempotent
+	 * VM-level setup done, when the plane-0 vCPU of this id was created.
+	 * A plane vCPU may be created later, after the VM ran.
+	 */
+	r = 0;
+	if (plane->level == 0)
+		r = kvm_arch_vcpu_precreate(kvm, id);
 	mutex_unlock(&kvm->lock);
 	if (r)
 		return r;
