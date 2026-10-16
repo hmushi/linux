@@ -117,6 +117,8 @@ u64 kvm_phys_timer_read(void);
 
 void kvm_timer_vcpu_load(struct kvm_vcpu *vcpu);
 void kvm_timer_vcpu_put(struct kvm_vcpu *vcpu);
+void kvm_timer_inject_idle_irqs(struct kvm_vcpu *vcpu);
+void kvm_timer_clear_idle_irqs(struct kvm_vcpu *vcpu);
 
 void kvm_timer_init_vhe(void);
 

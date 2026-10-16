@@ -329,8 +329,52 @@ static enum hrtimer_restart kvm_bg_timer_expire(struct hrtimer *hrt)
 		return HRTIMER_RESTART;
 	}
 
-	kvm_vcpu_wake_up(vcpu);
+	/* Wakes a blocked VP; makes a VP running another plane re-check. */
+	kvm_vcpu_kick(vcpu);
 	return HRTIMER_NORESTART;
+}
+
+/*
+ * Raise the timer interrupts of a plane vCPU that is not loaded, so that a
+ * sibling plane sees them as pending.  A loaded vCPU's timers raise their
+ * own interrupts in hardware.
+ */
+void kvm_timer_inject_idle_irqs(struct kvm_vcpu *vcpu)
+{
+	struct arch_timer_cpu *timer = vcpu_timer(vcpu);
+	int i;
+
+	if (!timer->enabled || vcpu == vcpu->common->current_vcpu)
+		return;
+
+	for (i = 0; i < nr_timers(vcpu); i++) {
+		struct arch_timer_context *ctx = &timer->timers[i];
+
+		/* Injecting an already pending level is a no-op in the vgic. */
+		if (!ctx->loaded && kvm_timer_should_fire(ctx))
+			kvm_timer_update_irq(vcpu, true, ctx);
+	}
+}
+
+/*
+ * Lower a not-loaded plane vCPU's timer lines so that a higher plane does not
+ * see its self-managed timer as a pending lower-plane interrupt. The owning
+ * plane still takes its timer in hardware when it runs loaded.
+ */
+void kvm_timer_clear_idle_irqs(struct kvm_vcpu *vcpu)
+{
+	struct arch_timer_cpu *timer = vcpu_timer(vcpu);
+	int i;
+
+	if (!timer->enabled || vcpu == vcpu->common->current_vcpu)
+		return;
+
+	for (i = 0; i < nr_timers(vcpu); i++) {
+		struct arch_timer_context *ctx = &timer->timers[i];
+
+		if (!ctx->loaded)
+			kvm_timer_update_irq(vcpu, false, ctx);
+	}
 }
 
 static enum hrtimer_restart kvm_hrtimer_expire(struct hrtimer *hrt)
@@ -950,7 +994,13 @@ void kvm_timer_vcpu_put(struct kvm_vcpu *vcpu)
 	if (map.emul_ptimer)
 		soft_timer_cancel(&map.emul_ptimer->hrtimer);
 
-	if (kvm_vcpu_is_blocking(vcpu))
+	/*
+	 * A plane vCPU put at the end of KVM_RUN may stay idle while a
+	 * sibling runs; a background timer keeps its expiry visible to
+	 * kvm_timer_inject_idle_irqs().  A preempted vCPU comes back soon.
+	 */
+	if (kvm_vcpu_is_blocking(vcpu) ||
+	    (vcpu->kvm->has_planes && !READ_ONCE(vcpu->common->scheduled_out)))
 		kvm_timer_blocking(vcpu);
 
 	if (vgic_is_v5(vcpu->kvm)) {
