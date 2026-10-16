@@ -430,6 +430,12 @@ struct vgic_dist {
 	struct xarray		lpi_xa;
 
 	/*
+	 * Device LPI -> owning redistributor for a guest without an ITS:
+	 * index = eventid (intid - VGIC_MIN_LPI), value = vcpu_id + 1, 0 unset.
+	 */
+	u16			lpi_rdist_owner[64];
+
+	/*
 	 * GICv4 ITS per-VM data, containing the IRQ domain, the VPE
 	 * array, the property table pointer as well as allocation
 	 * data. This essentially ties the Linux IRQ core and ITS

@@ -678,8 +678,43 @@ static int vgic_its_trigger_msi(struct kvm *kvm, struct vgic_its *its,
 	int err;
 
 	err = vgic_its_resolve_lpi(kvm, its, devid, eventid, &irq);
-	if (err)
-		return err;
+	if (err) {
+		/*
+		 * A Hyper-V guest enables LPIs but never programs the ITS,
+		 * so translation fails.  Deliver LPI VGIC_MIN_LPI + eventid
+		 * to the VP whose redistributor configured it, so device
+		 * interrupts (NVMe) reach the guest.
+		 */
+		struct vgic_dist *dist = &kvm->arch.vgic;
+		struct kvm_vcpu *fbvcpu = NULL;
+		u32 fbintid = VGIC_MIN_LPI + eventid;
+
+		if (eventid < ARRAY_SIZE(dist->lpi_rdist_owner) &&
+		    dist->lpi_rdist_owner[eventid])
+			fbvcpu = kvm_get_vcpu(kvm, dist->lpi_rdist_owner[eventid] - 1);
+		if (!fbvcpu)
+			fbvcpu = kvm_get_vcpu(kvm, 0);
+		if (!fbvcpu || !vgic_lpis_enabled(fbvcpu))
+			return err;
+
+		irq = vgic_add_lpi(kvm, fbintid, fbvcpu);
+		if (IS_ERR(irq))
+			return err;
+		/*
+		 * vgic_add_lpi() returns an existing irq with its old target,
+		 * and update_lpi_config() presents the irq on target_vcpu, so
+		 * retarget first.
+		 */
+		raw_spin_lock_irqsave(&irq->irq_lock, flags);
+		irq->target_vcpu = fbvcpu;
+		raw_spin_unlock_irqrestore(&irq->irq_lock, flags);
+		update_lpi_config(kvm, irq, NULL, true);
+		raw_spin_lock_irqsave(&irq->irq_lock, flags);
+		irq->pending_latch = true;
+		vgic_queue_irq_unlock(kvm, irq, flags);
+		vgic_put_irq(kvm, irq);
+		return 0;
+	}
 
 	if (irq->hw)
 		return irq_set_irqchip_state(irq->host_irq,
